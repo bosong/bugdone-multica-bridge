@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      0.9.1
+// @version      0.9.2
 // @description  BugDone桥接Multica智能体
+// @updateURL    https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
+// @downloadURL  https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
 // @match        https://www.bugdone.cn/*
 // @run-at       document-start
 // @fastlane-network
@@ -136,7 +138,7 @@
   }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '0.9.1';
+  const SCRIPT_VERSION = '0.9.2';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }

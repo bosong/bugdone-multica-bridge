@@ -8,7 +8,7 @@
 
 ## 安装
 
-1. 安装 [bugdone-multica.user.js](./bugdone-multica.user.js) 到 Tampermonkey，打开并登录 BugDone。
+1. 从 [脚本安装地址](https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js) 安装到 Tampermonkey，打开并登录 BugDone。已有的本地安装需要手动更新一次到 v0.9.2，之后可通过 `@updateURL` 检查新版本。
 2. 打开某个 Bug 详情，点击右下角 **Multica-AI · 已启动**。
 3. 在设置中填写 Multica API 地址、工作区 UUID、个人访问令牌（PAT），可选填写 Multica 项目 UUID；首次读取智能体后，列表和选择会保存在本地，下次打开自动恢复。
 4. 核对可编辑的任务内容，勾选确认，点击 **提交**。
