@@ -10,7 +10,7 @@
 
 1. 安装 [bugdone-multica.user.js](./bugdone-multica.user.js) 到 Tampermonkey，打开并登录 BugDone。
 2. 打开某个 Bug 详情，点击右下角 **Multica-AI · 已启动**。
-3. 在设置中填写 Multica API 地址、工作区 UUID、个人访问令牌（PAT），可选填写 Multica 项目 UUID，并读取智能体。
+3. 在设置中填写 Multica API 地址、工作区 UUID、个人访问令牌（PAT），可选填写 Multica 项目 UUID；首次读取智能体后，列表和选择会保存在本地，下次打开自动恢复。
 4. 核对可编辑的任务内容，勾选确认，点击 **提交**。
 
 脚本会先查找同一 Bug 的已有任务，避免重复创建。新任务提交前，脚本会从 `img.bugdone.cn` 获取截图，上传到 Multica，再通过 `attachment_ids` 将截图关联到任务。图片读取或上传失败时会停止创建并显示原因。非图片附件目前只作为原始链接写入任务描述。

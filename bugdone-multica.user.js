@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      0.9.0
+// @version      0.9.1
 // @description  BugDone桥接Multica智能体
 // @match        https://www.bugdone.cn/*
 // @run-at       document-start
@@ -81,6 +81,21 @@
     if (c.project && !UUID.test(c.project)) throw Error('Multica 项目 ID 必须是完整 UUID');
     return { ...c, api: u.origin, token: c.token.trim() };
   }
+  function agentCacheKey(c) { return `agents:${VERSION}:${c.api}:${c.workspace}`; }
+  function agentChoices(c, list) {
+    const agents = [], seen = new Set();
+    for (const item of Array.isArray(list) ? list : []) {
+      if (!item || typeof item.id !== 'string' || !item.id || item.is_archived === true || seen.has(item.id)) continue;
+      seen.add(item.id);
+      agents.push({ id: item.id, name: typeof item.name === 'string' && item.name ? item.name : item.id });
+    }
+    for (const id of [c.agent, c.defaultAgent]) {
+      if (typeof id === 'string' && id && !seen.has(id)) {
+        seen.add(id); agents.push({ id, name: `已保存的智能体 · ${id}` });
+      }
+    }
+    return { agents, selectedAgent: c.agent || c.defaultAgent || '', selectedDefault: c.defaultAgent || '' };
+  }
   const owns = (issue, id) => typeof issue?.title === 'string' && issue.title.startsWith(marker(id) + ' ');
   function cacheKey(c, id) { return `task:${VERSION}:${c.api}:${c.workspace}:${id}`; }
   async function findExisting(api, id) {
@@ -121,7 +136,7 @@
   }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '0.9.0';
+  const SCRIPT_VERSION = '0.9.1';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }
@@ -445,20 +460,31 @@
     try { await action(); } catch (e) { message(e.message || String(e), 'error'); }
     finally { busy = false; root.querySelectorAll('button[data-action]').forEach(x => x.disabled = false); }
   }
-  async function loadAgents(target = 'agent') {
+  function renderAgentChoices(c, list) {
+    const choices = agentChoices(c, list);
+    for (const [id, label, selected] of [
+      ['agent', '先读取智能体', choices.selectedAgent],
+      ['default-agent', '未设置默认智能体', choices.selectedDefault]
+    ]) {
+      const select = $(id);
+      select.replaceChildren();
+      const empty = document.createElement('option'); empty.value = ''; empty.textContent = label; select.append(empty);
+      for (const agent of choices.agents) {
+        const option = document.createElement('option'); option.value = agent.id; option.textContent = agent.name; select.append(option);
+      }
+      select.value = selected;
+    }
+    return choices.agents.length;
+  }
+  async function loadAgents() {
     const c = settings(); message('正在读取智能体…');
     const r = await request(c)('GET', '/api/agents');
     if (r.status !== 200) throw Error(`读取智能体失败（HTTP ${r.status}），请检查 Token 和工作区`);
     const agents = Array.isArray(r.data) ? r.data : r.data?.agents;
     if (!Array.isArray(agents)) throw Error('智能体返回结构与预期不符，请提供脱敏响应以适配');
-    const select = $(target); select.replaceChildren();
-    for (const a of agents) {
-      if (!a.id || a.is_archived === true) continue;
-      const o = document.createElement('option'); o.value = a.id; o.textContent = a.name || a.id; select.append(o);
-    }
-    const preferred = target === 'default-agent' ? config.defaultAgent : (config.agent || config.defaultAgent);
-    if (agents.some(a => a.id === preferred)) select.value = preferred;
-    message(`已读取 ${select.options.length} 个智能体。`);
+    const count = renderAgentChoices(c, agents);
+    writeValue(agentCacheKey(c), agentChoices({ agent: '', defaultAgent: '' }, agents).agents);
+    message(`已读取 ${count} 个智能体，已保存供下次打开使用。`);
   }
   async function submit() {
     const c = settings(), b = bugs.get($('bug').value);
@@ -562,7 +588,7 @@
             <div class="section-intro"><div><div class="eyebrow">AGENT HANDOFF</div><h3>交给智能体处理</h3></div><span class="badge">提交前查重</span></div>
             <div class="card"><div class="label-row"><p class="card-title">当前 Bug</p><button id="edit-bug" class="text-button">查看 / 编辑</button></div><p id="handoff-title">尚未选择 Bug</p><p id="handoff-meta" class="hint">请先在 Bug 详情中核对提交内容。</p></div>
             <div class="card"><div class="label-row"><p class="card-title">Multica 连接</p><button id="edit-settings" class="text-button">修改设置</button></div><div class="target"><small>API 服务</small><strong id="target-api"></strong></div><div class="divider"></div><div class="target"><small>工作区</small><strong id="target-workspace"></strong></div><div class="divider"></div><div class="target"><small>项目</small><strong id="target-project"></strong></div></div>
-            <div class="card"><div class="label-row"><label for="agent">处理智能体</label><button id="agents" data-action class="text-button">读取 / 刷新智能体</button></div><select id="agent"><option value="">先读取智能体</option></select><p class="hint">首次使用请先在“设置”中填写服务地址、工作区和 PAT。</p>
+            <div class="card"><div class="label-row"><label for="agent">处理智能体</label><button id="agents" data-action class="text-button">刷新智能体</button></div><select id="agent"><option value="">先读取智能体</option></select><p class="hint">已保存的选择会自动恢复；首次使用请先在“设置”中填写服务地址、工作区和 PAT。</p>
               <label class="check"><input type="checkbox" id="reviewed"><span>我已核对内容和附件链接，同意提交到当前 Multica 服务并指派所选智能体处理。</span></label>
               <button id="submit" data-action class="submit">提交</button><p class="hint">提交前仍会自动查重；找到已有任务时直接复用，不重复创建或触发执行。</p>
             </div>
@@ -576,7 +602,7 @@
               <div class="field"><label for="token">个人访问令牌（PAT）</label><input id="token" type="password" autocomplete="off"></div>
               <div class="field"><label for="project">Multica 项目 UUID（可选）</label><input id="project" autocomplete="off" spellcheck="false"></div>
               <div class="field"><label for="projectAlias">Multica 项目显示别名（可选）</label><input id="projectAlias" placeholder="例如：iOS 主仓库"><p class="hint">别名只用于界面识别，不会替代 UUID 发给 API。</p></div>
-              <div class="field"><div class="label-row"><label for="default-agent">默认处理智能体</label><button id="default-agents" data-action class="text-button">读取智能体</button></div><select id="default-agent"><option value="">未设置默认智能体</option></select><p class="hint">进入“Multica 接入”后会优先选中此智能体。</p></div>
+              <div class="field"><div class="label-row"><label for="default-agent">默认处理智能体</label><button id="default-agents" data-action class="text-button">读取 / 刷新智能体</button></div><select id="default-agent"><option value="">未设置默认智能体</option></select><p class="hint">已保存的默认智能体会自动恢复；刷新列表仅在首次读取或需要更新时使用。</p></div>
               <label class="check"><input type="checkbox" id="hide-native-ai"><span>隐藏 BugDone 原有 AI 按钮（openIntelligentTracking）</span></label>
               <div class="row"><button id="save" data-action>保存连接设置</button></div><p class="hint">令牌保存在当前可用的脚本存储中，不包含在任务描述里。远程自建服务需在脚本头部增加对应的 @connect 域名。</p>
             </div>
@@ -639,10 +665,22 @@
     $('restore').onclick = () => { $('reviewed').checked = false; preview(); };
     for (const id of ['title', 'description', 'api', 'workspace', 'workspaceAlias', 'project', 'projectAlias']) $(id).addEventListener('input', () => { $('reviewed').checked = false; });
     $('agent').addEventListener('change', () => { config.agent = $('agent').value; try { writeValue('config', { ...config, agent: config.agent }); } catch (e) { debug('智能体选择保存失败', { errorType: e.name }, 'warn'); } });
-    $('default-agent').value = config.defaultAgent || '';
-    $('default-agent').addEventListener('change', () => { config.defaultAgent = $('default-agent').value; try { writeValue('config', { ...config, defaultAgent: config.defaultAgent }); message('默认处理智能体已保存。', 'success'); } catch (e) { message('默认处理智能体保存失败。', 'error'); } });
-    $('agents').onclick = () => run(() => loadAgents('agent'));
-    $('default-agents').onclick = () => run(() => loadAgents('default-agent'));
+    renderAgentChoices(config, readValue(agentCacheKey(config), []));
+    $('default-agent').addEventListener('change', () => {
+      const previous = config.defaultAgent;
+      config.defaultAgent = $('default-agent').value;
+      if (!$('agent').value || $('agent').value === previous) $('agent').value = config.defaultAgent;
+      config.agent = $('agent').value;
+      try { writeValue('config', { ...config }); message('默认处理智能体已保存。', 'success'); }
+      catch (e) { message('默认处理智能体保存失败。', 'error'); }
+    });
+    $('agents').onclick = () => run(loadAgents);
+    $('default-agents').onclick = () => run(loadAgents);
+    for (const id of ['api', 'workspace']) $(id).addEventListener('change', () => {
+      const next = { api: $('api').value.trim(), workspace: $('workspace').value.trim() };
+      const same = next.api === config.api && next.workspace === config.workspace;
+      renderAgentChoices({ ...next, agent: same ? config.agent : '', defaultAgent: same ? config.defaultAgent : '' }, readValue(agentCacheKey(next), []));
+    });
     $('hide-native-ai').addEventListener('change', () => { config.hideNativeAI = $('hide-native-ai').checked; setNativeAIVisibility(config.hideNativeAI); try { writeValue('config', { ...config }); message(config.hideNativeAI ? '已隐藏 BugDone 原有 AI 按钮。' : '已显示 BugDone 原有 AI 按钮。', 'success'); } catch (e) { message('AI 按钮显示设置保存失败。', 'error'); } });
     $('save').onclick = () => run(async () => { config = settings(); writeValue('config', config); message(`连接设置已保存（${storageMode}）。`); });
     $('submit').onclick = () => run(submit);

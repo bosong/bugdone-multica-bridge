@@ -8,12 +8,26 @@ const end = source.indexOf('  // 调试桩：');
 assert.ok(start >= 0 && end > start);
 assert.ok(!/\bmodule\b|\brequire\s*\(/.test(source));
 const bridge = new Function('return ' + source.slice(start, end) +
-  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL };\n})();')();
+  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey };\n})();')();
 const id = '7603f73c983242c1811852a53b26e2c3';
 const c = { api: 'https://api.multica.ai', workspace: '11111111-1111-4111-8111-111111111111', token: 'test' };
 const bug = { BugId: id };
 const issue = { id: 'task-id', title: `${bridge.marker(id)} 测试 Bug`, status: 'done' };
 const body = { title: issue.title };
+test('已保存的智能体无需重新读取即可在设置和接入页恢复', () => {
+  const saved = { api: 'https://api.multica.ai', workspace: c.workspace, agent: '', defaultAgent: 'agent-default' };
+  assert.equal(bridge.agentCacheKey(saved), `agents:1:https://api.multica.ai:${c.workspace}`);
+  assert.deepEqual(bridge.agentChoices(saved, []), {
+    agents: [{ id: 'agent-default', name: '已保存的智能体 · agent-default' }],
+    selectedAgent: 'agent-default', selectedDefault: 'agent-default'
+  });
+  assert.deepEqual(bridge.agentChoices(saved, [
+    { id: 'agent-default', name: '修复智能体' }, { id: 'archived', name: '旧智能体', is_archived: true }
+  ]), {
+    agents: [{ id: 'agent-default', name: '修复智能体' }],
+    selectedAgent: 'agent-default', selectedDefault: 'agent-default'
+  });
+});
 test('分享地址采用官网项目与 Bug ID 路径，缺失或非法 ID 不生成链接', () => {
   const project = '45b65385f2a443dba353aa93fa2b8cf8';
   assert.equal(bridge.shareURL({ ProjectId: project, BugId: id }), `https://www.bugdone.cn/cn/bugPreview/${project}/${id}`);
