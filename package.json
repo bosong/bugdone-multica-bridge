@@ -1,0 +1,9 @@
+{
+  "name": "bugdone-multica-bridge",
+  "version": "0.9.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "check": "node --check bugdone-multica.user.js"
+  }
+}
