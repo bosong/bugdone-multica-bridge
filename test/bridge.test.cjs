@@ -8,7 +8,7 @@ const end = source.indexOf('  // 调试桩：');
 assert.ok(start >= 0 && end > start);
 assert.ok(!/\bmodule\b|\brequire\s*\(/.test(source));
 const bridge = new Function('return ' + source.slice(start, end) +
-  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey, listItems, buildIssueBody, bugTaskTitle, connectionCacheTag, needsCatalogRefresh };\n})();')();
+  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey, listItems, buildIssueBody, bugTaskTitle, connectionCacheTag, needsCatalogRefresh, connectionBadge, verifyConnection };\n})();')();
 const id = '7603f73c983242c1811852a53b26e2c3';
 const c = { api: 'https://api.multica.ai', workspace: '11111111-1111-4111-8111-111111111111', token: 'test' };
 const bug = { BugId: id };
@@ -37,6 +37,17 @@ test('已有连接缓存无需启动时重复拉取；Token 变化或缓存缺�
   assert.equal(bridge.needsCatalogRefresh(ready, tag, [{ id: c.workspace }], { agents: [], projects: [], labels: [] }), false);
   assert.equal(bridge.needsCatalogRefresh({ ...ready, token: 'token-two' }, tag, [{ id: c.workspace }], { agents: [], projects: [], labels: [] }), true);
   assert.equal(bridge.needsCatalogRefresh(ready, tag, [{ id: c.workspace }], null), true);
+});
+test('入口状态区分未配置、连接中、已连接和失败；缓存恢复须验证 Token', async () => {
+  assert.equal(bridge.connectionBadge({ api: c.api, token: '' }, 'connected').text, '未配置');
+  assert.equal(bridge.connectionBadge({ api: c.api, token: c.token }, 'idle').text, '待连接');
+  assert.equal(bridge.connectionBadge({ api: c.api, token: c.token }, 'connecting').text, '连接中');
+  assert.equal(bridge.connectionBadge({ api: c.api, token: c.token }, 'connected').text, '已连接');
+  assert.equal(bridge.connectionBadge({ api: c.api, token: c.token }, 'error').text, '连接失败');
+  const calls = [];
+  await bridge.verifyConnection(async (method, path) => { calls.push([method, path]); return { status: 200 }; });
+  assert.deepEqual(calls, [['GET', '/api/me']]);
+  await assert.rejects(bridge.verifyConnection(async () => ({ status: 401 })), /HTTP 401/);
 });
 test('新旧 BugDone 标题均可识别为同一个 Bug，避免升级后重复创建', () => {
   assert.equal(bridge.owns({ title: `[BugDone] #284 测试 [BugDone:${id}]` }, id), true);

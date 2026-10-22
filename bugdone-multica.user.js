@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      0.10.2
+// @version      0.10.3
 // @description  BugDone桥接Multica智能体
 // @updateURL    https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
 // @downloadURL  https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
@@ -124,6 +124,17 @@
       !Array.isArray(workspaces) || !workspaces.some(item => item.id === c.workspace) ||
       !catalog || !['projects', 'agents', 'labels'].every(key => Array.isArray(catalog[key]));
   }
+  function connectionBadge(c, phase) {
+    if (!c.api || c.api === '__add__' || !c.token?.trim()) return { text: '未配置', color: '#94a3b8' };
+    if (phase === 'connecting') return { text: '连接中', color: '#3b82f6' };
+    if (phase === 'connected') return { text: '已连接', color: '#22c55e' };
+    if (phase === 'error') return { text: '连接失败', color: '#ef4444' };
+    return { text: '待连接', color: '#eab308' };
+  }
+  async function verifyConnection(api) {
+    const response = await api('GET', '/api/me');
+    if (response.status !== 200) throw Error(`连接验证失败（HTTP ${response.status}），请检查地址和令牌`);
+  }
   function buildIssueBody({ title, description, agent, project, status, priority, label, startDate, dueDate }) {
     if (!title?.trim() || !description?.trim()) throw Error('标题和描述不能为空');
     if (!UUID.test(agent || '')) throw Error('请选择处理智能体');
@@ -177,7 +188,7 @@
   }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '0.10.2';
+  const SCRIPT_VERSION = '0.10.3';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }
@@ -216,6 +227,18 @@
   let submittedBugs = [];
   let launchPosition = readValue('launchPosition', null);
   config = { ...config, ...(readValue('config', config) || {}) };
+  let connectionPhase = 'idle';
+  function setConnectionPhase(phase, expectedTag) {
+    if (expectedTag && root && expectedTag !== connectionCacheTag($('api').value, $('token').value)) return;
+    connectionPhase = phase;
+    if (!root) return;
+    const launch = $('launch');
+    if (!launch) return;
+    const badge = connectionBadge({ api: $('api').value, token: $('token').value }, phase);
+    launch.querySelector('.launch-text').textContent = `Multica-AI · ${badge.text}`;
+    launch.querySelector('.status-dot').style.backgroundColor = badge.color;
+    launch.title = `${badge.text} · 脚本 v${SCRIPT_VERSION}；点击查看详情`;
+  }
   const savedBugs = readValue('submittedBugs', []);
   submittedBugs = Array.isArray(savedBugs) ? savedBugs.slice(0, 100) : [];
   function submittedFor(id) { return submittedBugs.find(x => x && x.bugId === id); }
@@ -356,7 +379,13 @@
   function request(c) {
     return (method, path, body) => new Promise((resolve, reject) => {
       let done = false, handle;
-      const finish = (fn, x) => { if (!done) { done = true; clearTimeout(timer); fn(x); } };
+      const tag = connectionCacheTag(c.api, c.token);
+      const finish = (fn, x) => {
+        if (done) return;
+        done = true; clearTimeout(timer);
+        if (fn === reject || x?.status === 401) setConnectionPhase('error', tag);
+        fn(x);
+      };
       const timer = setTimeout(() => { finish(reject, Error('请求超时；提交结果可能未知，请勿盲目重复创建')); handle?.abort(); }, 30000);
       const headers = { Authorization: `Bearer ${c.token}`, 'Content-Type': 'application/json' };
       if (c.workspace) headers['X-Workspace-ID'] = c.workspace;
@@ -565,37 +594,52 @@
     return data;
   }
   async function connect() {
-    const c = validateConnection({ api: $('api').value, token: $('token').value, workspace: '' });
-    message('正在连接并读取工作区…');
-    const response = await request(c)('GET', '/api/workspaces');
-    if (response.status !== 200) throw Error(`连接失败（HTTP ${response.status}），请检查地址和令牌`);
-    const workspaces = listItems(response.data, 'workspaces');
-    const preferred = workspaces.some(item => item.id === config.workspace) ? config.workspace : '';
-    const selected = fillSelect('workspace', workspaces, preferred, '选择工作区', true);
-    if (!selected) throw Error('连接成功，但此账号没有可用工作区');
-    const scoped = { ...c, workspace: selected };
-    await loadWorkspaceData(scoped);
-    config = { ...config, ...scoped, workspace: selected, project: $('default-project').value,
-      defaultAgent: $('default-agent').value, agent: $('agent').value, label: $('default-label').value };
-    writeValue('config', config);
-    writeValue(`workspaces:${c.api}`, workspaces);
-    writeValue(`connection-tag:${c.api}`, connectionCacheTag(c.api, c.token));
-    message(`连接成功，已读取 ${workspaces.length} 个工作区及当前工作区的选项。`, 'success');
+    let tag;
+    setConnectionPhase('connecting');
+    try {
+      const c = validateConnection({ api: $('api').value, token: $('token').value, workspace: '' });
+      tag = connectionCacheTag(c.api, c.token);
+      message('正在连接并读取工作区…');
+      const response = await request(c)('GET', '/api/workspaces');
+      if (response.status !== 200) throw Error(`连接失败（HTTP ${response.status}），请检查地址和令牌`);
+      const workspaces = listItems(response.data, 'workspaces');
+      const preferred = workspaces.some(item => item.id === config.workspace) ? config.workspace : '';
+      const selected = fillSelect('workspace', workspaces, preferred, '选择工作区', true);
+      if (!selected) throw Error('连接成功，但此账号没有可用工作区');
+      const scoped = { ...c, workspace: selected };
+      await loadWorkspaceData(scoped);
+      config = { ...config, ...scoped, workspace: selected, project: $('default-project').value,
+        defaultAgent: $('default-agent').value, agent: $('agent').value, label: $('default-label').value };
+      writeValue('config', config);
+      writeValue(`workspaces:${c.api}`, workspaces);
+      writeValue(`connection-tag:${c.api}`, tag);
+      setConnectionPhase('connected', tag);
+      message(`连接成功，已读取 ${workspaces.length} 个工作区及当前工作区的选项。`, 'success');
+    } catch (error) { setConnectionPhase('error', tag); throw error; }
   }
   async function connectIfNeeded() {
-    if (!$('token').value.trim() || $('api').value === '__add__') return;
+    if (!$('token').value.trim() || $('api').value === '__add__') { setConnectionPhase('idle'); return; }
     const c = { api: $('api').value, token: $('token').value, workspace: $('workspace').value };
+    const tag = connectionCacheTag(c.api, c.token);
+    setConnectionPhase('connecting', tag);
     const workspaces = readValue(`workspaces:${c.api}`, null);
     const catalog = readValue(`catalog:${c.api}:${c.workspace}`, null);
-    if (needsCatalogRefresh(c, readValue(`connection-tag:${c.api}`, ''), workspaces, catalog)) {
-      await connect(); return;
+    try {
+      if (needsCatalogRefresh(c, readValue(`connection-tag:${c.api}`, ''), workspaces, catalog)) {
+        await connect(); return;
+      }
+      await verifyConnection(request({ ...c, workspace: '' }));
+      fillSelect('workspace', workspaces, c.workspace, '选择工作区', true);
+      applyCatalog(c, catalog);
+      config = { ...config, ...c, project: $('default-project').value, defaultAgent: $('default-agent').value,
+        agent: $('agent').value, label: $('default-label').value };
+      writeValue('config', config);
+      setConnectionPhase('connected', tag);
+      message('连接已验证，已恢复本地选项；需要更新时点击刷新。', 'success');
+    } catch (error) {
+      setConnectionPhase('error', tag);
+      throw error;
     }
-    fillSelect('workspace', workspaces, c.workspace, '选择工作区', true);
-    applyCatalog(c, catalog);
-    config = { ...config, ...c, project: $('default-project').value, defaultAgent: $('default-agent').value,
-      agent: $('agent').value, label: $('default-label').value };
-    writeValue('config', config);
-    message('已恢复本地连接选项；需要更新时点击刷新。', 'success');
   }
   async function submit() {
     const c = settings(), b = bugs.get($('bug').value);
@@ -679,7 +723,7 @@
       @media(max-width:520px){#panel{right:8px;top:8px;bottom:76px;width:calc(100vw - 16px);border-radius:15px}header{padding:16px}.tabs{padding:0 16px;gap:22px}.content{padding:16px}footer{padding:12px 16px}.card{padding:14px}#launch{right:12px;bottom:16px}}
       </style>
       <div id="success" class="success" hidden role="status" aria-live="polite"><span class="success-mark">✓</span><div><strong>创建成功</strong><span class="success-copy"></span></div></div>
-      <button id="launch" aria-expanded="false" aria-controls="panel"><img src="/Templates/Default/Images/ai.webp" alt=""><span>Multica-AI · 已启动</span><span class="status-dot" aria-hidden="true"></span></button>
+      <button id="launch" aria-expanded="false" aria-controls="panel"><img src="/Templates/Default/Images/ai.webp" alt=""><span class="launch-text">Multica-AI · 未配置</span><span class="status-dot" aria-hidden="true"></span></button>
       <section id="panel" role="dialog" aria-label="Multica-AI Bug 工作台" hidden>
         <header><div class="brand"><img class="brand-icon" src="/Templates/Default/Images/ai.webp" alt=""><div><h2>Multica-AI</h2><small>BugDone 智能体工作台</small></div></div><div class="header-actions"><button id="open-multica" class="text-button">打开 Multica</button><button id="refresh-connection" data-action class="icon-button" title="刷新连接" aria-label="刷新连接">↻</button><button id="close" class="icon-button" aria-label="关闭面板">×</button></div></header>
         <nav class="tabs" role="tablist" aria-label="工作台栏目">
@@ -720,6 +764,7 @@
       </section>`;
     renderServers();
     $('token').value = config.token || '';
+    setConnectionPhase('idle');
     fillSelect('workspace', readValue(`workspaces:${config.api}`, []), config.workspace, '请先连接', false);
     if (config.workspace && !$('workspace').value) fillSelect('workspace', [{ id: config.workspace, name: config.workspaceAlias || config.workspace }], config.workspace, '请先连接');
     const catalog = readValue(`catalog:${config.api}:${config.workspace}`, {}) || {};
@@ -752,7 +797,6 @@
       drag = null;
     });
     launch.onclick = () => { if (suppressLaunchClick) return; $('panel').hidden = !$('panel').hidden; launch.setAttribute('aria-expanded', String(!$('panel').hidden)); if (!$('panel').hidden) root.querySelector('[role=tab][aria-selected=true]').focus(); };
-    $('launch').title = `脚本已运行 v${SCRIPT_VERSION}；F12 Console 搜索 BugDone→Multica 查看日志`;
     $('close').onclick = () => { $('panel').hidden = true; $('launch').setAttribute('aria-expanded', 'false'); $('launch').focus(); };
     $('panel').addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); $('close').click(); } });
     const tabs = [...root.querySelectorAll('[role="tab"]')];
@@ -825,6 +869,7 @@
     });
     $('api').addEventListener('change', () => {
       const api = $('api').value;
+      setConnectionPhase('idle');
       if (api === '__add__') { $('custom-server-panel').hidden = false; $('custom-api').focus(); return; }
       $('custom-server-panel').hidden = true;
       fillSelect('workspace', readValue(`workspaces:${api}`, []), '', '请先连接', true);
@@ -832,6 +877,7 @@
       renderAgentChoices({ agent: '', defaultAgent: '' }, []);
       void run(connectIfNeeded);
     });
+    $('token').addEventListener('input', () => setConnectionPhase('idle'));
     $('token').addEventListener('change', () => { if ($('token').value.trim()) void run(connectIfNeeded); });
     $('workspace').addEventListener('change', () => run(async () => {
       const workspace = $('workspace').value;
