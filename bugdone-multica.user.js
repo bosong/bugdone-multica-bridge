@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      0.10.1
+// @version      0.10.2
 // @description  BugDone桥接Multica智能体
 // @updateURL    https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
 // @downloadURL  https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
@@ -177,7 +177,7 @@
   }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '0.10.1';
+  const SCRIPT_VERSION = '0.10.2';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }
@@ -776,7 +776,29 @@
     });
     $('task-attachments').onclick = () => switchTab('bug', true);
     $('agent-task').onchange = () => { $('submit').disabled = !$('agent-task').checked; if (!$('agent-task').checked) message('当前桥接只支持智能体任务。'); };
-    $('open-multica').onclick = () => { const api = $('api').value; window.open(api === 'https://api.multica.ai' ? 'https://multica.ai' : api, '_blank', 'noopener,noreferrer'); };
+    $('open-multica').onclick = () => {
+      // 桌面端注册 multica://；网页无法直接查询安装状态，用失焦和原生回执判断是否需要回退。
+      let opened = false;
+      const openWebsite = () => {
+        const tab = window.open('about:blank', '_blank');
+        if (!tab) { window.location.assign('https://multica.ai'); return; }
+        tab.opener = null;
+        tab.location.replace('https://multica.ai');
+      };
+      const onNativeOpen = () => { opened = true; clearTimeout(fallbackTimer); };
+      window.addEventListener('fastlane:multica-opened', onNativeOpen, { once: true });
+      const fallbackTimer = setTimeout(() => {
+        window.removeEventListener('fastlane:multica-opened', onNativeOpen);
+        if (opened || document.hidden || !document.hasFocus()) return;
+        openWebsite();
+      }, 1800);
+      try { window.location.href = 'multica://open'; }
+      catch {
+        clearTimeout(fallbackTimer);
+        window.removeEventListener('fastlane:multica-opened', onNativeOpen);
+        openWebsite();
+      }
+    };
     $('refresh-connection').onclick = () => run(connect);
     $('connect').onclick = () => run(connect);
     $('add-api').onclick = () => run(async () => {
