@@ -8,12 +8,25 @@ const end = source.indexOf('  // 调试桩：');
 assert.ok(start >= 0 && end > start);
 assert.ok(!/\bmodule\b|\brequire\s*\(/.test(source));
 const bridge = new Function('return ' + source.slice(start, end) +
-  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey };\n})();')();
+  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey, listItems, buildIssueBody };\n})();')();
 const id = '7603f73c983242c1811852a53b26e2c3';
 const c = { api: 'https://api.multica.ai', workspace: '11111111-1111-4111-8111-111111111111', token: 'test' };
 const bug = { BugId: id };
 const issue = { id: 'task-id', title: `${bridge.marker(id)} 测试 Bug`, status: 'done' };
 const body = { title: issue.title };
+test('连接列表兼容数组与包装结果；任务选项正确写入创建请求', () => {
+  assert.deepEqual(bridge.listItems({ workspaces: [{ id: 'w', name: '研发' }] }, 'workspaces'), [{ id: 'w', name: '研发' }]);
+  assert.deepEqual(bridge.listItems([{ id: 'p', name: '项目' }], 'projects'), [{ id: 'p', name: '项目' }]);
+  assert.deepEqual(bridge.buildIssueBody({ title: '标题', description: '描述', bugId: id, agent: c.workspace,
+    project: c.workspace, status: 'in_progress', priority: 'high', label: c.workspace,
+    startDate: '2026-10-22', dueDate: '2026-10-24' }), {
+    title: `[BugDone:${id}] 标题`, description: '描述', status: 'in_progress', priority: 'high',
+    assignee_type: 'agent', assignee_id: c.workspace, allow_duplicate: false,
+    project_id: c.workspace, label_ids: [c.workspace], start_date: '2026-10-22', due_date: '2026-10-24'
+  });
+  assert.throws(() => bridge.buildIssueBody({ title: '标题', description: '描述', bugId: id,
+    agent: c.workspace, startDate: '2026-10-24', dueDate: '2026-10-22' }), /截止日期/);
+});
 test('已保存的智能体无需重新读取即可在设置和接入页恢复', () => {
   const saved = { api: 'https://api.multica.ai', workspace: c.workspace, agent: '', defaultAgent: 'agent-default' };
   assert.equal(bridge.agentCacheKey(saved), `agents:1:https://api.multica.ai:${c.workspace}`);

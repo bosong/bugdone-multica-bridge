@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      0.9.2
+// @version      0.10.0
 // @description  BugDone桥接Multica智能体
 // @updateURL    https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
 // @downloadURL  https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
@@ -15,6 +15,7 @@
 // @connect      img.bugdone.cn
 // @connect      localhost
 // @connect      127.0.0.1
+// @connect      *
 // ==/UserScript==
 
 (() => {
@@ -83,6 +84,13 @@
     if (c.project && !UUID.test(c.project)) throw Error('Multica 项目 ID 必须是完整 UUID');
     return { ...c, api: u.origin, token: c.token.trim() };
   }
+  function validateConnection(c) {
+    const u = new URL(c.api);
+    if (u.username || u.password || u.search || u.hash || u.pathname !== '/') throw Error('API 地址请填写服务根地址');
+    if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname))) throw Error('远程 API 必须使用 HTTPS');
+    if (!c.token?.trim()) throw Error('请填写访问令牌');
+    return { ...c, api: u.origin, token: c.token.trim() };
+  }
   function agentCacheKey(c) { return `agents:${VERSION}:${c.api}:${c.workspace}`; }
   function agentChoices(c, list) {
     const agents = [], seen = new Set();
@@ -97,6 +105,23 @@
       }
     }
     return { agents, selectedAgent: c.agent || c.defaultAgent || '', selectedDefault: c.defaultAgent || '' };
+  }
+  function listItems(data, key) {
+    if (Array.isArray(data)) return data;
+    for (const value of [data?.[key], data?.items, data?.data]) if (Array.isArray(value)) return value;
+    throw Error(`读取 ${key} 列表失败：响应结构不受支持`);
+  }
+  function buildIssueBody({ title, description, bugId, agent, project, status, priority, label, startDate, dueDate }) {
+    if (!title?.trim() || !description?.trim()) throw Error('标题和描述不能为空');
+    if (!UUID.test(agent || '')) throw Error('请选择处理智能体');
+    if (startDate && dueDate && startDate > dueDate) throw Error('截止日期不能早于开始日期');
+    const body = { title: `${marker(bugId)} ${title.trim()}`, description, status: status || 'todo',
+      priority: priority || 'none', assignee_type: 'agent', assignee_id: agent, allow_duplicate: false };
+    if (project) body.project_id = project;
+    if (label) body.label_ids = [label];
+    if (startDate) body.start_date = startDate;
+    if (dueDate) body.due_date = dueDate;
+    return body;
   }
   const owns = (issue, id) => typeof issue?.title === 'string' && issue.title.startsWith(marker(id) + ' ');
   function cacheKey(c, id) { return `task:${VERSION}:${c.api}:${c.workspace}:${id}`; }
@@ -138,7 +163,7 @@
   }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '0.9.2';
+  const SCRIPT_VERSION = '0.10.0';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }
@@ -172,7 +197,7 @@
     try { window.sessionStorage.setItem(storageKey, serialized); storageMode = '网页会话存储'; return; } catch (e) { debug('sessionStorage 写入失败，使用内存缓存', { errorType: e.name }, 'warn'); }
     memoryStore.set(key, value); storageMode = '页面内存缓存';
   }
-  let config = { api: 'https://api.multica.ai', workspace: '', workspaceAlias: '', token: '', agent: '', defaultAgent: '', project: '', projectAlias: '' };
+  let config = { api: 'https://api.multica.ai', workspace: '', workspaceAlias: '', token: '', agent: '', defaultAgent: '', project: '', projectAlias: '', label: '' };
   config.hideNativeAI = true;
   let submittedBugs = [];
   let launchPosition = readValue('launchPosition', null);
@@ -312,14 +337,15 @@
   }
   function message(text, kind = 'info') { const el = $('message'); el.textContent = text; el.className = `status-${kind}`; }
   function settings() {
-    return validateConfig({ api: $('api').value.trim(), workspace: $('workspace').value.trim(), workspaceAlias: $('workspaceAlias').value.trim(), token: $('token').value, project: $('project').value.trim(), projectAlias: $('projectAlias').value.trim(), agent: $('agent').value, defaultAgent: $('default-agent').value, hideNativeAI: $('hide-native-ai').checked });
+    return validateConfig({ api: $('api').value.trim(), workspace: $('workspace').value, workspaceAlias: $('workspace').selectedOptions[0]?.textContent || '', token: $('token').value, project: $('default-project').value, projectAlias: $('default-project').selectedOptions[0]?.textContent || '', agent: $('agent').value, defaultAgent: $('default-agent').value, label: $('default-label').value, hideNativeAI: $('hide-native-ai').checked });
   }
   function request(c) {
     return (method, path, body) => new Promise((resolve, reject) => {
       let done = false, handle;
       const finish = (fn, x) => { if (!done) { done = true; clearTimeout(timer); fn(x); } };
       const timer = setTimeout(() => { finish(reject, Error('请求超时；提交结果可能未知，请勿盲目重复创建')); handle?.abort(); }, 30000);
-      const headers = { Authorization: `Bearer ${c.token}`, 'X-Workspace-ID': c.workspace, 'Content-Type': 'application/json' };
+      const headers = { Authorization: `Bearer ${c.token}`, 'Content-Type': 'application/json' };
+      if (c.workspace) headers['X-Workspace-ID'] = c.workspace;
       try {
         if (typeof GM_xmlhttpRequest === 'function') {
           handle = GM_xmlhttpRequest({ method, url: c.api + path, anonymous: true, redirect: 'error', headers,
@@ -446,10 +472,10 @@
     previewFingerprint = JSON.stringify(b);
     $('title').value = b.BugTitle;
     $('description').value = description(b);
+    $('task-title').value = b.BugTitle;
+    $('task-description').value = description(b);
     $('share-url').value = shareURL(b);
     $('bug-state').textContent = b.detail ? '详情已就绪' : '等待详情';
-    $('handoff-title').textContent = `#${b.BugCode} ${b.BugTitle}`;
-    $('handoff-meta').textContent = `${b.ProjectName || '未提供项目'} · ${b.StrPriority || '未提供优先级'} · ${b.attachments.length} 个附件`;
     const expected = Number(b.PicCount) + Number(b.AttachmentCount);
     $('warning').textContent = !b.detail ? '仅捕获列表：请先打开此 Bug 的详情，待出现“✓详情”后提交。' :
       b.attachments.length < expected ? `原始记录有 ${expected} 个附件，目前仅捕获 ${b.attachments.length} 个；请核对附件是否完整。` :
@@ -478,26 +504,82 @@
     }
     return choices.agents.length;
   }
-  async function loadAgents() {
-    const c = settings(); message('正在读取智能体…');
-    const r = await request(c)('GET', '/api/agents');
-    if (r.status !== 200) throw Error(`读取智能体失败（HTTP ${r.status}），请检查 Token 和工作区`);
-    const agents = Array.isArray(r.data) ? r.data : r.data?.agents;
-    if (!Array.isArray(agents)) throw Error('智能体返回结构与预期不符，请提供脱敏响应以适配');
-    const count = renderAgentChoices(c, agents);
-    writeValue(agentCacheKey(c), agentChoices({ agent: '', defaultAgent: '' }, agents).agents);
-    message(`已读取 ${count} 个智能体，已保存供下次打开使用。`);
+  function fillSelect(id, items, selected, emptyLabel, chooseFirst = false) {
+    const select = $(id); select.replaceChildren();
+    const empty = document.createElement('option'); empty.value = ''; empty.textContent = emptyLabel; select.append(empty);
+    for (const item of items) {
+      if (!item?.id || item.is_archived === true) continue;
+      const option = document.createElement('option'); option.value = item.id;
+      option.textContent = item.name || item.title || item.key || item.id; select.append(option);
+    }
+    if (selected && ![...select.options].some(option => option.value === selected)) {
+      const saved = document.createElement('option'); saved.value = selected; saved.textContent = `已保存 · ${selected}`; select.append(saved);
+    }
+    if (selected && [...select.options].some(option => option.value === selected)) select.value = selected;
+    else if (chooseFirst && select.options.length > 1) select.selectedIndex = 1;
+    return select.value;
+  }
+  function configuredServers() {
+    const saved = readValue('servers', []);
+    return ['https://api.multica.ai', ...(Array.isArray(saved) ? saved : [])].filter((value, index, all) => all.indexOf(value) === index);
+  }
+  function renderServers() {
+    const servers = configuredServers().map(api => ({ id: api, name: api === 'https://api.multica.ai' ? 'Multica 官方 · https://api.multica.ai' : api }));
+    if (config.api && !servers.some(item => item.id === config.api)) servers.push({ id: config.api, name: config.api });
+    fillSelect('api', servers, config.api, '选择 API 服务', true);
+  }
+  async function loadWorkspaceData(c) {
+    const paths = [['projects', '/api/projects'], ['agents', '/api/agents'], ['labels', '/api/labels']];
+    const results = await Promise.all(paths.map(async ([key, path]) => {
+      const response = await request(c)('GET', path);
+      if (response.status !== 200) throw Error(`读取${key}失败（HTTP ${response.status}）`);
+      return [key, listItems(response.data, key)];
+    }));
+    const data = Object.fromEntries(results);
+    const project = data.projects.some(item => item.id === config.project) ? config.project : '';
+    const agent = data.agents.some(item => item.id === config.agent) ? config.agent : '';
+    const defaultAgent = data.agents.some(item => item.id === config.defaultAgent) ? config.defaultAgent : '';
+    fillSelect('default-project', data.projects, project, '不指定项目', true);
+    fillSelect('task-project', data.projects, project, '无项目', true);
+    renderAgentChoices({ ...c, agent, defaultAgent }, data.agents);
+    if (!$('default-agent').value && $('default-agent').options.length > 1) $('default-agent').selectedIndex = 1;
+    if (!$('agent').value && $('agent').options.length > 1) $('agent').selectedIndex = 1;
+    const label = data.labels.some(item => item.id === config.label) ? config.label : '';
+    fillSelect('default-label', data.labels, label, '不指定标签');
+    fillSelect('task-label', data.labels, label, '无标签');
+    writeValue(`catalog:${c.api}:${c.workspace}`, data);
+    return data;
+  }
+  async function connect() {
+    const c = validateConnection({ api: $('api').value, token: $('token').value, workspace: '' });
+    message('正在连接并读取工作区…');
+    const response = await request(c)('GET', '/api/workspaces');
+    if (response.status !== 200) throw Error(`连接失败（HTTP ${response.status}），请检查地址和令牌`);
+    const workspaces = listItems(response.data, 'workspaces');
+    const preferred = workspaces.some(item => item.id === config.workspace) ? config.workspace : '';
+    const selected = fillSelect('workspace', workspaces, preferred, '选择工作区', true);
+    if (!selected) throw Error('连接成功，但此账号没有可用工作区');
+    const scoped = { ...c, workspace: selected };
+    await loadWorkspaceData(scoped);
+    config = { ...config, ...scoped, workspace: selected, project: $('default-project').value,
+      defaultAgent: $('default-agent').value, agent: $('agent').value, label: $('default-label').value };
+    writeValue('config', config);
+    writeValue(`workspaces:${c.api}`, workspaces);
+    message(`连接成功，已读取 ${workspaces.length} 个工作区及当前工作区的选项。`, 'success');
   }
   async function submit() {
     const c = settings(), b = bugs.get($('bug').value);
+    c.project = $('task-project').value;
+    c.projectAlias = $('task-project').selectedOptions[0]?.textContent || '';
     if (!b?.detail) throw Error('请先在 BugDone 打开此 Bug 的详情，或导入详情 JSON，再提交');
     if (!UUID.test(c.agent)) throw Error('请先读取并选择智能体');
-    if (!$('title').value.trim() || !$('description').value.trim()) throw Error('标题和描述不能为空');
+    if (!$('task-title').value.trim() || !$('task-description').value.trim()) throw Error('标题和描述不能为空');
     if (!$('reviewed').checked) throw Error('请先核对预览内容，并勾选提交确认');
     if (!navigator.locks) throw Error('当前浏览器不支持提交锁，请使用新版 Chrome/Edge');
-    const body = { title: `${marker(b.BugId)} ${$('title').value.trim()}`, description: $('description').value,
-      status: 'todo', assignee_type: 'agent', assignee_id: c.agent, allow_duplicate: false };
-    if (c.project) body.project_id = c.project;
+    const body = buildIssueBody({ title: $('task-title').value, description: $('task-description').value,
+      bugId: b.BugId, agent: c.agent, project: $('task-project').value, status: $('task-status').value,
+      priority: $('task-priority').value, label: $('task-label').value,
+      startDate: $('task-start').value, dueDate: $('task-due').value });
     message('正在核对已有任务；确认不存在后创建并指派…');
     const result = await navigator.locks.request(cacheKey(c, b.BugId), () => submitOnce({
       c, bug: b, body, api: request(c), get: readValue, set: writeValue,
@@ -518,9 +600,6 @@
       if (selected && focus) tab.focus();
     });
     root.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== `view-${name}`; });
-    $('target-api').textContent = $('api').value.trim() || '尚未配置 API 地址';
-    $('target-workspace').textContent = $('workspace').value.trim() ? `${$('workspaceAlias').value.trim() || '工作区'} · ${$('workspace').value.trim()}` : '请先在设置中填写工作区和 PAT';
-    $('target-project').textContent = $('project').value.trim() ? `${$('projectAlias').value.trim() || 'Multica 项目'} · ${$('project').value.trim()}` : '未指定 Multica 项目';
     if (name === 'processing') renderProcessing();
   }
   function showSuccess(text) {
@@ -560,6 +639,7 @@
       .tabs{display:flex;padding:0 24px;gap:23px;background:#fff;border-bottom:1px solid #e7eaf1}.tabs button{border:0;border-bottom:3px solid transparent;border-radius:0;padding:13px 2px;color:#7c8697;background:transparent;white-space:nowrap}.tabs button[aria-selected=true]{color:#4f46e5;border-bottom-color:#6366f1}.tabs button:hover{color:#4f46e5}
       .content{overflow-y:auto;min-height:0;flex:1;overscroll-behavior:contain;padding:22px 24px}.section-intro{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:16px}.eyebrow{font-size:11px;letter-spacing:1.6px;color:#9399aa;font-weight:700}.section-intro h3{margin:3px 0 0;font-size:17px;color:#273449}.badge{font-size:12px;padding:4px 9px;border-radius:20px;color:#4f46e5;background:#eeedff;white-space:nowrap}.empty{padding:30px 8px;text-align:center;color:#94a3b8}.processing-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-bottom:1px solid #edf0f5}.processing-item:last-child{border-bottom:0}.processing-main{min-width:0}.processing-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.processing-meta{margin-top:4px;color:#8791a3;font-size:12px;overflow-wrap:anywhere}.processing-delete{flex:none}.success{position:fixed;left:50%;top:18%;transform:translate(-50%,-50%);z-index:2147483648;display:flex;align-items:center;gap:12px;min-width:290px;max-width:calc(100vw - 40px);padding:15px 18px;background:#fff;border:1px solid #bbf7d0;border-radius:14px;box-shadow:0 18px 55px #14532d30}.success-mark{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:#22c55e;color:#fff;font-size:21px;font-weight:800}.success strong{display:block;color:#166534}.success-copy{display:block;margin-top:3px;color:#64748b;font-size:12px;white-space:pre-line}.success-pop{animation:success-pop .35s ease-out}@keyframes success-pop{0%{opacity:0;transform:translate(-50%,-65%) scale(.9)}100%{opacity:1;transform:translate(-50%,-50%) scale(1)}}
       .card{padding:18px;border:1px solid #e5e8f0;background:#fff;border-radius:14px;margin-bottom:16px}.card-title{font-weight:650;margin:0 0 12px}.field{margin-top:16px}.field:first-child{margin-top:0}label{display:block;font-size:13px;font-weight:600;color:#46536a;margin:0 0 7px}input,select,textarea{width:100%;padding:10px 12px;border:1px solid #dce1ec;border-radius:9px;background:#fff;color:#273449;outline:none}input:focus,select:focus,textarea:focus{border-color:#818cf8;box-shadow:0 0 0 3px #6366f112}textarea{resize:vertical;line-height:1.7;font-size:13px}input[readonly]{background:#f8f9fc;color:#64748b;font-size:12px}.hint,small{font-size:12px;line-height:1.7;color:#8791a3}.hint{margin:7px 0 0}.row{display:flex;gap:10px;margin-top:16px;align-items:center;flex-wrap:wrap}.row.end{justify-content:flex-end}.secondary{background:#fff;border-color:#dfe3ed;color:#526075}.secondary:hover{background:#f1f3f9}.text-button{padding:4px 0;background:transparent;color:#6366f1;font-size:12px}.text-button:hover{background:transparent;color:#4338ca}.label-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px}.label-row label{margin:0}
+      .header-actions{display:flex;align-items:center;gap:8px}.header-actions .text-button{white-space:nowrap}.header-actions .icon-button{font-size:17px}.task-title{font-size:20px;font-weight:650;border:0;padding:8px 0}.task-description{min-height:250px;border:0;padding:8px 0;resize:vertical}.task-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.task-grid .field{margin:0}.settings-group{border-top:1px solid #edf0f5;padding-top:18px;margin-top:18px}.settings-group:first-child{border-top:0;padding-top:0;margin-top:0}.settings-group h4{margin:0 0 12px;font-size:14px}.inline-control{display:flex;gap:8px}.inline-control>*:first-child{flex:1;min-width:0}.inline-control button{white-space:nowrap}.link-note{padding:10px 12px;border:1px solid #e5e8f0;border-radius:9px;background:#f8f9fc;font-size:12px;color:#64748b;overflow-wrap:anywhere}@media(max-width:520px){.task-grid{grid-template-columns:1fr}.header-actions .text-button{font-size:11px}}
       #count{margin:0 0 14px;font-size:12px;color:#8290a5}#warning{margin:10px 0 0;font-size:12px;line-height:1.7;color:#896a31}#handoff-title{margin:0;color:#334155;font-weight:600;overflow-wrap:anywhere}#handoff-meta{margin:8px 0 0}.target{display:grid;gap:4px;overflow-wrap:anywhere}.target small{font-size:11px;text-transform:uppercase;letter-spacing:.8px}.target strong{font-weight:500;font-size:13px}.divider{height:1px;background:#edf0f5;margin:14px 0}.check{display:flex;align-items:flex-start;gap:9px;font-weight:400;line-height:1.7;margin-top:17px}.check input{width:16px;height:16px;flex:none;margin:3px 0;accent-color:#6366f1}.check span{font-size:12px;color:#66758b}.submit{width:100%;margin-top:16px}
       footer{flex:none;padding:12px 24px;background:#fff;border-top:1px solid #e7eaf1}#message{white-space:pre-wrap;margin:0;font-size:12px;color:#64748b;overflow-wrap:anywhere;max-height:110px;overflow:auto;display:flex;align-items:flex-start;gap:8px}#message::before{content:"";width:9px;height:9px;flex:none;margin-top:4px;border-radius:50%;background:#94a3b8}.status-success::before{background:#22c55e!important}.status-warning::before{background:#eab308!important}.status-error::before{background:#ef4444!important}details summary{cursor:pointer;font-size:13px;font-weight:600;color:#536078}details textarea{margin-top:12px}.version{font-size:11px;color:#9aa3b2;text-align:center;margin:18px 0 0}
       @media(max-width:520px){#panel{right:8px;top:8px;bottom:76px;width:calc(100vw - 16px);border-radius:15px}header{padding:16px}.tabs{padding:0 16px;gap:22px}.content{padding:16px}footer{padding:12px 16px}.card{padding:14px}#launch{right:12px;bottom:16px}}
@@ -567,12 +647,12 @@
       <div id="success" class="success" hidden role="status" aria-live="polite"><span class="success-mark">✓</span><div><strong>创建成功</strong><span class="success-copy"></span></div></div>
       <button id="launch" aria-expanded="false" aria-controls="panel"><img src="/Templates/Default/Images/ai.webp" alt=""><span>Multica-AI · 已启动</span><span class="status-dot" aria-hidden="true"></span></button>
       <section id="panel" role="dialog" aria-label="Multica-AI Bug 工作台" hidden>
-        <header><div class="brand"><img class="brand-icon" src="/Templates/Default/Images/ai.webp" alt=""><div><h2>Multica-AI</h2><small>BugDone 智能体工作台</small></div></div><button id="close" class="icon-button" aria-label="关闭面板">×</button></header>
+        <header><div class="brand"><img class="brand-icon" src="/Templates/Default/Images/ai.webp" alt=""><div><h2>Multica-AI</h2><small>BugDone 智能体工作台</small></div></div><div class="header-actions"><button id="open-multica" class="text-button">打开 Multica</button><button id="refresh-connection" data-action class="icon-button" title="刷新连接" aria-label="刷新连接">↻</button><button id="close" class="icon-button" aria-label="关闭面板">×</button></div></header>
         <nav class="tabs" role="tablist" aria-label="工作台栏目">
           <button id="tab-bug" role="tab" data-tab="bug" aria-selected="true" aria-controls="view-bug">Bug 详情</button>
-          <button id="tab-multica" role="tab" data-tab="multica" aria-selected="false" aria-controls="view-multica" tabindex="-1">Multica 接入</button>
-          <button id="tab-processing" role="tab" data-tab="processing" aria-selected="false" aria-controls="view-processing" tabindex="-1">处理列表</button>
+          <button id="tab-multica" role="tab" data-tab="multica" aria-selected="false" aria-controls="view-multica" tabindex="-1">AI任务创建</button>
           <button id="tab-settings" role="tab" data-tab="settings" aria-selected="false" aria-controls="view-settings" tabindex="-1">设置</button>
+          <button id="tab-processing" role="tab" data-tab="processing" aria-selected="false" aria-controls="view-processing" tabindex="-1">处理列表</button>
         </nav>
         <div class="content">
           <section id="view-bug" role="tabpanel" aria-labelledby="tab-bug">
@@ -584,31 +664,21 @@
               <div class="field"><label for="share-url">只读分享链接</label><input id="share-url" readonly placeholder="捕获项目 ID 和 Bug ID 后生成"><p class="hint">采用 BugDone 原生分享地址规则，已同步到下方预览。</p></div>
               <div class="field"><div class="label-row"><label for="description">提交内容预览（可编辑）</label><button id="restore" class="text-button">重新生成</button></div><textarea id="description" rows="13" placeholder="捕获详情后，将显示来源、只读分享、问题描述与附件链接。"></textarea></div>
             </div>
-            <div class="row end"><button id="next">下一步：AI 处理 →</button></div>
+            <details class="card"><summary>手动导入 BugDone 响应</summary><p class="hint">自动捕获不可用时，可导入列表或详情接口的响应。</p><textarea id="json" rows="6" aria-label="BugDone 响应 JSON" placeholder="粘贴 Result / ReturnObj 格式 JSON，不要粘贴请求头或 Cookie"></textarea><div class="row"><button id="import" data-action class="secondary">导入响应</button></div></details>
+            <div class="row end"><button id="next">下一步：AI任务创建 →</button></div>
           </section>
           <section id="view-multica" role="tabpanel" aria-labelledby="tab-multica" hidden>
-            <div class="section-intro"><div><div class="eyebrow">AGENT HANDOFF</div><h3>交给智能体处理</h3></div><span class="badge">提交前查重</span></div>
-            <div class="card"><div class="label-row"><p class="card-title">当前 Bug</p><button id="edit-bug" class="text-button">查看 / 编辑</button></div><p id="handoff-title">尚未选择 Bug</p><p id="handoff-meta" class="hint">请先在 Bug 详情中核对提交内容。</p></div>
-            <div class="card"><div class="label-row"><p class="card-title">Multica 连接</p><button id="edit-settings" class="text-button">修改设置</button></div><div class="target"><small>API 服务</small><strong id="target-api"></strong></div><div class="divider"></div><div class="target"><small>工作区</small><strong id="target-workspace"></strong></div><div class="divider"></div><div class="target"><small>项目</small><strong id="target-project"></strong></div></div>
-            <div class="card"><div class="label-row"><label for="agent">处理智能体</label><button id="agents" data-action class="text-button">刷新智能体</button></div><select id="agent"><option value="">先读取智能体</option></select><p class="hint">已保存的选择会自动恢复；首次使用请先在“设置”中填写服务地址、工作区和 PAT。</p>
+            <div class="section-intro"><div><div class="eyebrow">AI TASK</div><h3>创建智能体任务</h3></div><span class="badge">提交前查重</span></div>
+            <div class="card"><input id="task-title" class="task-title" placeholder="任务标题"><textarea id="task-description" class="task-description" rows="12" placeholder="添加描述..."></textarea><div class="link-note">🔗 当前 BugDone 页面 · 来源将随任务保存</div><div class="task-grid"><div class="field"><label for="task-status">任务状态</label><select id="task-status"><option value="todo">待办</option><option value="backlog">待整理</option><option value="in_progress">进行中</option><option value="in_review">待审核</option><option value="done">已完成</option><option value="blocked">已阻塞</option></select></div><div class="field"><label for="task-priority">优先级</label><select id="task-priority"><option value="none">无优先级</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="urgent">紧急</option></select></div><div class="field"><label for="agent">处理智能体</label><select id="agent"><option value="">请先连接</option></select></div><div class="field"><label for="task-project">项目</label><select id="task-project"><option value="">无项目</option></select></div><div class="field"><label for="task-label">标签</label><select id="task-label"><option value="">无标签</option></select></div></div><details class="settings-group"><summary>有效日期（可选）</summary><div class="task-grid"><div class="field"><label for="task-start">开始日期</label><input id="task-start" type="date"></div><div class="field"><label for="task-due">截止日期</label><input id="task-due" type="date"></div></div></details>
               <label class="check"><input type="checkbox" id="reviewed"><span>我已核对内容和附件链接，同意提交到当前 Multica 服务并指派所选智能体处理。</span></label>
               <button id="submit" data-action class="submit">提交</button><p class="hint">提交前仍会自动查重；找到已有任务时直接复用，不重复创建或触发执行。</p>
             </div>
           </section>
           <section id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
-            <div class="section-intro"><div><div class="eyebrow">CONNECTION</div><h3>连接你的 Multica</h3></div></div>
-            <div class="card">
-              <div class="field"><label for="api">API 服务根地址</label><input id="api" placeholder="https://api.multica.ai" spellcheck="false"></div>
-              <div class="field"><label for="workspace">工作区 UUID</label><input id="workspace" autocomplete="off" spellcheck="false"></div>
-              <div class="field"><label for="workspaceAlias">工作区显示别名（可选）</label><input id="workspaceAlias" placeholder="例如：研发测试工作区"></div>
-              <div class="field"><label for="token">个人访问令牌（PAT）</label><input id="token" type="password" autocomplete="off"></div>
-              <div class="field"><label for="project">Multica 项目 UUID（可选）</label><input id="project" autocomplete="off" spellcheck="false"></div>
-              <div class="field"><label for="projectAlias">Multica 项目显示别名（可选）</label><input id="projectAlias" placeholder="例如：iOS 主仓库"><p class="hint">别名只用于界面识别，不会替代 UUID 发给 API。</p></div>
-              <div class="field"><div class="label-row"><label for="default-agent">默认处理智能体</label><button id="default-agents" data-action class="text-button">读取 / 刷新智能体</button></div><select id="default-agent"><option value="">未设置默认智能体</option></select><p class="hint">已保存的默认智能体会自动恢复；刷新列表仅在首次读取或需要更新时使用。</p></div>
-              <label class="check"><input type="checkbox" id="hide-native-ai"><span>隐藏 BugDone 原有 AI 按钮（openIntelligentTracking）</span></label>
-              <div class="row"><button id="save" data-action>保存连接设置</button></div><p class="hint">令牌保存在当前可用的脚本存储中，不包含在任务描述里。远程自建服务需在脚本头部增加对应的 @connect 域名。</p>
-            </div>
-            <details class="card"><summary>手动导入 BugDone 响应</summary><p class="hint">自动捕获不可用时，可导入列表或详情接口的响应。</p><textarea id="json" rows="6" aria-label="BugDone 响应 JSON" placeholder="粘贴 Result / ReturnObj 格式 JSON，不要粘贴请求头或 Cookie"></textarea><div class="row"><button id="import" data-action class="secondary">导入响应</button></div></details>
+            <div class="section-intro"><div><div class="eyebrow">PREFERENCES</div><h3>设置</h3></div></div>
+            <div class="card"><div class="settings-group"><h4>基础配置</h4><div class="field"><label for="api">API 服务根地址</label><select id="api"></select></div><div class="field"><label for="custom-api">添加自建服务器</label><div class="inline-control"><input id="custom-api" type="url" placeholder="https://your-multica.example"><button id="add-api" class="secondary">添加</button></div></div><div class="field"><label for="token">访问令牌（API Token）</label><input id="token" type="password" autocomplete="off"></div><div class="row"><button id="connect" data-action>手动连接</button></div></div>
+              <div class="settings-group"><h4>任务默认配置</h4><div class="field"><label for="workspace">默认工作区</label><select id="workspace"><option value="">请先连接</option></select></div><div class="field"><label for="default-project">默认项目</label><select id="default-project"><option value="">请先连接</option></select></div><div class="field"><label for="default-agent">默认处理智能体</label><select id="default-agent"><option value="">请先连接</option></select></div><div class="field"><label for="default-label">默认标签</label><select id="default-label"><option value="">不指定标签</option></select></div></div>
+              <div class="settings-group"><h4>其他配置</h4><label class="check"><input type="checkbox" id="hide-native-ai"><span>隐藏 BugDone 原有 AI 按钮（openIntelligentTracking）</span></label></div><div class="row"><button id="save" data-action>保存设置</button></div><p class="hint">令牌仅保存在当前站点的本地存储；自建服务器还需允许油猴或 Mac App 网络桥访问。</p></div>
             <p class="version">BugDone → Multica · v${SCRIPT_VERSION}</p>
           </section>
           <section id="view-processing" role="tabpanel" aria-labelledby="tab-processing" hidden>
@@ -618,7 +688,15 @@
         </div>
         <footer><p id="message" role="status" aria-live="polite">尚未提交 · 请先核对 Bug 详情。</p></footer>
       </section>`;
-    for (const id of ['api', 'workspace', 'workspaceAlias', 'token', 'project', 'projectAlias']) $(id).value = config[id] || '';
+    renderServers();
+    $('token').value = config.token || '';
+    fillSelect('workspace', readValue(`workspaces:${config.api}`, []), config.workspace, '请先连接', false);
+    if (config.workspace && !$('workspace').value) fillSelect('workspace', [{ id: config.workspace, name: config.workspaceAlias || config.workspace }], config.workspace, '请先连接');
+    const catalog = readValue(`catalog:${config.api}:${config.workspace}`, {});
+    fillSelect('default-project', catalog.projects || (config.project ? [{ id: config.project, name: config.projectAlias || config.project }] : []), config.project, '不指定项目');
+    fillSelect('task-project', catalog.projects || (config.project ? [{ id: config.project, name: config.projectAlias || config.project }] : []), config.project, '无项目');
+    fillSelect('default-label', catalog.labels || [], config.label, '不指定标签');
+    fillSelect('task-label', catalog.labels || [], config.label, '无标签');
     $('hide-native-ai').checked = config.hideNativeAI !== false;
     const launch = $('launch');
     if (launchPosition && Number.isFinite(Number(launchPosition.left)) && Number.isFinite(Number(launchPosition.top))) {
@@ -659,15 +737,23 @@
         if (next !== undefined) { e.preventDefault(); switchTab(tabs[next].dataset.tab, true); }
       };
     });
-    $('next').onclick = () => switchTab('multica', true);
-    $('edit-bug').onclick = () => switchTab('bug', true);
-    $('edit-settings').onclick = () => switchTab('settings', true);
+    $('next').onclick = () => { $('task-title').value = $('title').value; $('task-description').value = $('description').value; switchTab('multica', true); };
+    $('open-multica').onclick = () => { const api = $('api').value; window.open(api === 'https://api.multica.ai' ? 'https://multica.ai' : api, '_blank', 'noopener,noreferrer'); };
+    $('refresh-connection').onclick = () => run(connect);
+    $('connect').onclick = () => run(connect);
+    $('add-api').onclick = () => run(async () => {
+      const c = validateConnection({ api: $('custom-api').value.trim(), token: 'address-only' });
+      const saved = configuredServers().filter(api => api !== 'https://api.multica.ai');
+      if (!saved.includes(c.api)) saved.push(c.api);
+      writeValue('servers', saved); config.api = c.api; renderServers(); $('custom-api').value = '';
+      message('自建服务已添加；点击“手动连接”读取工作区。');
+    });
     switchTab('bug');
     $('bug').onchange = () => { $('reviewed').checked = false; preview(); };
     $('restore').onclick = () => { $('reviewed').checked = false; preview(); };
-    for (const id of ['title', 'description', 'api', 'workspace', 'workspaceAlias', 'project', 'projectAlias']) $(id).addEventListener('input', () => { $('reviewed').checked = false; });
+    for (const id of ['title', 'description', 'task-title', 'task-description', 'api', 'workspace', 'task-project', 'task-status', 'task-priority', 'task-label', 'task-start', 'task-due']) $(id).addEventListener('input', () => { $('reviewed').checked = false; });
     $('agent').addEventListener('change', () => { config.agent = $('agent').value; try { writeValue('config', { ...config, agent: config.agent }); } catch (e) { debug('智能体选择保存失败', { errorType: e.name }, 'warn'); } });
-    renderAgentChoices(config, readValue(agentCacheKey(config), []));
+    renderAgentChoices(config, catalog.agents || readValue(agentCacheKey(config), []));
     $('default-agent').addEventListener('change', () => {
       const previous = config.defaultAgent;
       config.defaultAgent = $('default-agent').value;
@@ -676,12 +762,23 @@
       try { writeValue('config', { ...config }); message('默认处理智能体已保存。', 'success'); }
       catch (e) { message('默认处理智能体保存失败。', 'error'); }
     });
-    $('agents').onclick = () => run(loadAgents);
-    $('default-agents').onclick = () => run(loadAgents);
-    for (const id of ['api', 'workspace']) $(id).addEventListener('change', () => {
-      const next = { api: $('api').value.trim(), workspace: $('workspace').value.trim() };
-      const same = next.api === config.api && next.workspace === config.workspace;
-      renderAgentChoices({ ...next, agent: same ? config.agent : '', defaultAgent: same ? config.defaultAgent : '' }, readValue(agentCacheKey(next), []));
+    $('api').addEventListener('change', () => {
+      const api = $('api').value;
+      fillSelect('workspace', readValue(`workspaces:${api}`, []), '', '请先连接');
+      for (const id of ['default-project', 'task-project', 'default-label', 'task-label']) fillSelect(id, [], '', '请先连接');
+      renderAgentChoices({ agent: '', defaultAgent: '' }, []);
+      message('服务已切换，请点击“手动连接”。');
+    });
+    $('workspace').addEventListener('change', () => run(async () => {
+      const workspace = $('workspace').value;
+      if (!workspace) return;
+      config = { ...config, api: $('api').value, token: $('token').value, workspace, project: '', defaultAgent: '', agent: '', label: '' };
+      await loadWorkspaceData(validateConfig(config)); writeValue('config', { ...config, project: $('default-project').value,
+        defaultAgent: $('default-agent').value, agent: $('agent').value });
+      message('已切换工作区，相关选项已更新。', 'success');
+    }));
+    for (const id of ['default-project', 'default-label']) $(id).addEventListener('change', () => {
+      const taskId = id === 'default-project' ? 'task-project' : 'task-label'; $(taskId).value = $(id).value;
     });
     $('hide-native-ai').addEventListener('change', () => { config.hideNativeAI = $('hide-native-ai').checked; setNativeAIVisibility(config.hideNativeAI); try { writeValue('config', { ...config }); message(config.hideNativeAI ? '已隐藏 BugDone 原有 AI 按钮。' : '已显示 BugDone 原有 AI 按钮。', 'success'); } catch (e) { message('AI 按钮显示设置保存失败。', 'error'); } });
     $('save').onclick = () => run(async () => { config = settings(); writeValue('config', config); message(`连接设置已保存（${storageMode}）。`); });
@@ -693,7 +790,7 @@
     });
     renderBugs();
     renderProcessing();
-    if (captureHookFailed) message('当前环境未能安装自动捕获。可在“设置”中使用“手动导入 BugDone 响应”继续操作。');
+    if (captureHookFailed) message('当前环境未能安装自动捕获。可在“Bug 详情”中使用“手动导入 BugDone 响应”继续操作。');
     if (!hasGMStorage) message('当前使用网页本地存储保存配置和处理列表。');
     if (storageFailed) message('浏览器存储不可用，请允许 BugDone 保存站点数据后刷新。');
     debug('界面挂载完成', { buttonConnected: host.isConnected, capturedBugs: bugs.size });

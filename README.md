@@ -4,14 +4,14 @@
 
 ![BugDone 接入 Multica 的界面预览](./assets/ui-preview.png)
 
-*界面预览使用本地模拟 Bug 和智能体数据。*
+*界面预览使用本地模拟数据，展示的是旧版布局；当前界面以脚本为准。*
 
 ## 安装
 
 1. 从 [脚本安装地址](https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js) 安装到 Tampermonkey，打开并登录 BugDone。已有的本地安装需要手动更新一次到 v0.9.2，之后可通过 `@updateURL` 检查新版本。
 2. 打开某个 Bug 详情，点击右下角 **Multica-AI · 已启动**。
-3. 在设置中填写 Multica API 地址、工作区 UUID、个人访问令牌（PAT），可选填写 Multica 项目 UUID；首次读取智能体后，列表和选择会保存在本地，下次打开自动恢复。
-4. 核对可编辑的任务内容，勾选确认，点击 **提交**。
+3. 在设置中选择官方或添加自建 API 服务，填写 API Token，点击 **手动连接**。脚本会读取工作区、项目、智能体和标签；可设置默认选项。
+4. 在 Bug 详情核对捕获内容，点击 **下一步：AI任务创建**，编辑任务状态、优先级、智能体、项目、标签或有效日期，勾选确认后提交。
 
 脚本会先查找同一 Bug 的已有任务，避免重复创建。新任务提交前，脚本会从 `img.bugdone.cn` 获取截图，上传到 Multica，再通过 `attachment_ids` 将截图关联到任务。图片读取或上传失败时会停止创建并显示原因。非图片附件目前只作为原始链接写入任务描述。
 
