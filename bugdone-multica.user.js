@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      1.0.0
+// @version      1.0.1
 // @description  BugDone桥接Multica智能体
 // @updateURL    https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
 // @downloadURL  https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
@@ -161,6 +161,38 @@
     }
     throw Error('搜索结果过多，无法确认是否重复；请人工核对');
   }
+  async function lookupSubmittedIssue(api, item) {
+    if (item.issueId) {
+      const r = await api('GET', `/api/issues/${encodeURIComponent(item.issueId)}`);
+      if (r.status === 200) {
+        if (!r.data?.id || r.data.id !== item.issueId) throw Error('任务响应 ID 不匹配');
+        if (item.api || owns(r.data, item.bugId)) return r.data;
+      } else if (r.status !== 404) throw Error(`任务状态查询失败（HTTP ${r.status}）`);
+    }
+    return item.bugId ? findExisting(api, item.bugId) : null;
+  }
+  function issueStatusLabel(status) {
+    const labels = { backlog: '待整理', todo: '待办', in_progress: '进行中', in_review: '待审核', done: '已完成', blocked: '已阻塞' };
+    const value = typeof status === 'string' ? status : status?.name;
+    return labels[value] || value || '未知';
+  }
+  async function loadSubmittedStatuses(items, c, api, report) {
+    let next = 0;
+    const worker = async () => {
+      while (next < items.length) {
+        const item = items[next++];
+        if (item.workspace !== c.workspace || (item.api && item.api !== c.api)) {
+          report(item, { kind: 'unavailable' });
+          continue;
+        }
+        try {
+          const issue = await lookupSubmittedIssue(api, item);
+          report(item, issue ? { kind: 'ready', status: issue.status, issue } : { kind: 'missing' });
+        } catch (error) { report(item, { kind: 'error', error }); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, items.length) }, worker));
+  }
   async function submitOnce({ c, bug, body, api, get, set, prepareBody }) {
     const key = cacheKey(c, bug.BugId);
     const record = get(key, null);
@@ -188,7 +220,7 @@
   }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '1.0.0';
+  const SCRIPT_VERSION = '1.0.1';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }
@@ -225,6 +257,8 @@
   let config = { api: 'https://api.multica.ai', workspace: '', workspaceAlias: '', token: '', agent: '', defaultAgent: '', project: '', projectAlias: '', label: '' };
   config.hideNativeAI = true;
   let submittedBugs = [];
+  const processingStates = new WeakMap(), processingRows = new Map();
+  let processingRefreshPromise = null, processingRefreshAt = 0, processingRefreshContext = '';
   let launchPosition = readValue('launchPosition', null);
   config = { ...config, ...(readValue('config', config) || {}) };
   let connectionPhase = 'idle';
@@ -245,8 +279,10 @@
   function rememberSubmitted(b, issue, c) {
     const item = { bugId: b.BugId, bugCode: b.BugCode, title: b.BugTitle, issueId: issue.id,
       identifier: issue.identifier || '', issueTitle: issue.title || '', submittedAt: new Date().toISOString(),
+      api: c.api, status: issue.status || '',
       workspace: c.workspace, workspaceAlias: c.workspaceAlias || '', project: c.project || '', projectAlias: c.projectAlias || '' };
     submittedBugs = [item, ...submittedBugs.filter(x => x.bugId !== b.BugId || x.workspace !== c.workspace)].slice(0, 100);
+    processingRefreshAt = 0;
     try { writeValue('submittedBugs', submittedBugs); } catch (e) { debug('已处理列表保存失败', { errorType: e.name }, 'warn'); }
     return item;
   }
@@ -675,7 +711,7 @@
       if (selected && focus) tab.focus();
     });
     root.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== `view-${name}`; });
-    if (name === 'processing') renderProcessing();
+    if (name === 'processing') { renderProcessing(); void refreshProcessingStatuses(); }
   }
   function showSuccess(text) {
     const box = $('success'); box.querySelector('.success-copy').textContent = text;
@@ -683,18 +719,52 @@
     clearTimeout(showSuccess.timer); showSuccess.timer = setTimeout(() => { box.hidden = true; }, 5500);
   }
   function renderProcessing() {
-    const list = $('processing-list'); if (!list) return; list.replaceChildren();
+    const list = $('processing-list'); if (!list) return; list.replaceChildren(); processingRows.clear();
     $('processing-count').textContent = `共 ${submittedBugs.length} 条，最多保留 100 条`;
     if (!submittedBugs.length) { const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = '还没有已提交给 Multica-AI 的 Bug。'; list.append(empty); return; }
     for (const item of submittedBugs) {
       const row = document.createElement('article'); row.className = 'processing-item';
       const time = new Date(item.submittedAt).toLocaleString('zh-CN', { hour12: false });
-      row.innerHTML = `<div class="processing-main"><div class="processing-title"></div><div class="processing-meta"></div></div><button class="text-button processing-delete">删除</button>`;
+      row.innerHTML = `<div class="processing-main"><div class="processing-title"></div><div class="processing-meta"></div><div class="processing-status"></div></div><button class="text-button processing-delete">删除</button>`;
       row.querySelector('.processing-title').textContent = `#${item.bugCode || '-'} ${item.title || item.bugId}`;
       row.querySelector('.processing-meta').textContent = `${item.identifier || item.issueId || '任务 ID 未返回'} · ${time}${item.workspaceAlias ? ` · ${item.workspaceAlias}` : ''}`;
+      const status = row.querySelector('.processing-status');
+      const saved = processingStates.get(item);
+      const context = `${$('api').value}:${$('workspace').value}:${connectionCacheTag($('api').value, $('token').value)}`;
+      if (saved?.context === context) setProcessingStatus(status, saved.result);
+      else status.textContent = item.status ? `Multica 状态：${issueStatusLabel(item.status)}（提交时）` : 'Multica 状态：待查询';
+      processingRows.set(item, status);
       row.querySelector('.processing-delete').onclick = () => { forgetSubmitted(item); renderProcessing(); renderBugs(); message('已从本地处理列表删除；不会删除 Multica 中的任务。'); };
       list.append(row);
     }
+  }
+  function setProcessingStatus(el, result) {
+    el.dataset.kind = result.kind;
+    if (result.kind === 'ready') el.textContent = `Multica 状态：${issueStatusLabel(result.status)}`;
+    else if (result.kind === 'missing') el.textContent = 'Multica 状态：未找到对应任务';
+    else if (result.kind === 'unavailable') el.textContent = 'Multica 状态：请切换到提交时的服务和工作区';
+    else el.textContent = `Multica 状态：查询失败（${String(result.error?.message || '请稍后重试').slice(0, 90)}）`;
+  }
+  async function refreshProcessingStatuses(force = false) {
+    if (processingRefreshPromise) return processingRefreshPromise;
+    if (!submittedBugs.length) return;
+    let c;
+    try { c = settings(); }
+    catch (_) { processingRows.forEach(el => { delete el.dataset.kind; el.textContent = 'Multica 状态：请先完成 API 和工作区配置'; }); return; }
+    const context = `${c.api}:${c.workspace}:${connectionCacheTag(c.api, c.token)}`;
+    if (!force && processingRefreshContext === context && Date.now() - processingRefreshAt < 60000) return;
+    $('refresh-processing').disabled = true;
+    processingRows.forEach(el => { delete el.dataset.kind; el.textContent = 'Multica 状态：查询中…'; });
+    processingRefreshPromise = loadSubmittedStatuses([...submittedBugs], c, request(c), (item, result) => {
+      processingStates.set(item, { context, result });
+      const el = processingRows.get(item);
+      if (el && el.isConnected && `${$('api').value}:${$('workspace').value}:${connectionCacheTag($('api').value, $('token').value)}` === context)
+        setProcessingStatus(el, result);
+    }).finally(() => {
+      processingRefreshAt = Date.now(); processingRefreshContext = context;
+      processingRefreshPromise = null; $('refresh-processing').disabled = false;
+    });
+    return processingRefreshPromise;
   }
   function mount() {
     debug('开始挂载按钮');
@@ -712,7 +782,7 @@
       #panel{position:fixed;right:24px;top:24px;bottom:88px;width:min(680px,calc(100vw - 48px));z-index:2147483647;display:flex;flex-direction:column;background:#f7f8fc;border:1px solid #e1e5ee;border-radius:20px;box-shadow:0 20px 70px #1e293b35;overflow:hidden}
       header{display:flex;justify-content:space-between;align-items:center;padding:23px 24px 18px;background:#fff;gap:12px}.brand{display:flex;align-items:center;gap:12px}.brand-icon{width:42px;height:42px;padding:9px;border:1px solid #e9e7ff;border-radius:13px;background:#f3f2ff}.brand h2{font-size:19px;line-height:1.3;margin:0;letter-spacing:-.4px}.brand small{font-size:12px;color:#8993a3}.icon-button{background:#f4f5f8;color:#677489;font-size:22px;line-height:1;padding:8px 12px}.icon-button:hover{background:#e8eaf0}
       .tabs{display:flex;padding:0 24px;gap:23px;background:#fff;border-bottom:1px solid #e7eaf1}.tabs button{border:0;border-bottom:3px solid transparent;border-radius:0;padding:13px 2px;color:#7c8697;background:transparent;white-space:nowrap}.tabs button[aria-selected=true]{color:#4f46e5;border-bottom-color:#6366f1}.tabs button:hover{color:#4f46e5}
-      .content{overflow-y:auto;min-height:0;flex:1;overscroll-behavior:contain;padding:22px 24px}.section-intro{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:16px}.eyebrow{font-size:11px;letter-spacing:1.6px;color:#9399aa;font-weight:700}.section-intro h3{margin:3px 0 0;font-size:17px;color:#273449}.badge{font-size:12px;padding:4px 9px;border-radius:20px;color:#4f46e5;background:#eeedff;white-space:nowrap}.empty{padding:30px 8px;text-align:center;color:#94a3b8}.processing-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-bottom:1px solid #edf0f5}.processing-item:last-child{border-bottom:0}.processing-main{min-width:0}.processing-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.processing-meta{margin-top:4px;color:#8791a3;font-size:12px;overflow-wrap:anywhere}.processing-delete{flex:none}.success{position:fixed;left:50%;top:18%;transform:translate(-50%,-50%);z-index:2147483648;display:flex;align-items:center;gap:12px;min-width:290px;max-width:calc(100vw - 40px);padding:15px 18px;background:#fff;border:1px solid #bbf7d0;border-radius:14px;box-shadow:0 18px 55px #14532d30}.success-mark{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:#22c55e;color:#fff;font-size:21px;font-weight:800}.success strong{display:block;color:#166534}.success-copy{display:block;margin-top:3px;color:#64748b;font-size:12px;white-space:pre-line}.success-pop{animation:success-pop .35s ease-out}@keyframes success-pop{0%{opacity:0;transform:translate(-50%,-65%) scale(.9)}100%{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+      .content{overflow-y:auto;min-height:0;flex:1;overscroll-behavior:contain;padding:22px 24px}.section-intro{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:16px}.eyebrow{font-size:11px;letter-spacing:1.6px;color:#9399aa;font-weight:700}.section-intro h3{margin:3px 0 0;font-size:17px;color:#273449}.badge{font-size:12px;padding:4px 9px;border-radius:20px;color:#4f46e5;background:#eeedff;white-space:nowrap}.empty{padding:30px 8px;text-align:center;color:#94a3b8}.processing-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-bottom:1px solid #edf0f5}.processing-item:last-child{border-bottom:0}.processing-main{min-width:0;flex:1}.processing-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.processing-meta{margin-top:4px;color:#8791a3;font-size:12px;overflow-wrap:anywhere}.processing-status{margin-top:9px;padding-top:7px;border-top:1px solid #edf0f5;font-size:12px;color:#64748b}.processing-status[data-kind=ready]{color:#4f46e5}.processing-status[data-kind=error]{color:#b45309}.processing-delete{flex:none}.processing-actions{display:flex;align-items:center;gap:12px}.success{position:fixed;left:50%;top:18%;transform:translate(-50%,-50%);z-index:2147483648;display:flex;align-items:center;gap:12px;min-width:290px;max-width:calc(100vw - 40px);padding:15px 18px;background:#fff;border:1px solid #bbf7d0;border-radius:14px;box-shadow:0 18px 55px #14532d30}.success-mark{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:#22c55e;color:#fff;font-size:21px;font-weight:800}.success strong{display:block;color:#166534}.success-copy{display:block;margin-top:3px;color:#64748b;font-size:12px;white-space:pre-line}.success-pop{animation:success-pop .35s ease-out}@keyframes success-pop{0%{opacity:0;transform:translate(-50%,-65%) scale(.9)}100%{opacity:1;transform:translate(-50%,-50%) scale(1)}}
       .card{padding:18px;border:1px solid #e5e8f0;background:#fff;border-radius:14px;margin-bottom:16px}.card-title{font-weight:650;margin:0 0 12px}.field{margin-top:16px}.field:first-child{margin-top:0}label{display:block;font-size:13px;font-weight:600;color:#46536a;margin:0 0 7px}input,select,textarea{width:100%;padding:10px 12px;border:1px solid #dce1ec;border-radius:9px;background:#fff;color:#273449;outline:none}input:focus,select:focus,textarea:focus{border-color:#818cf8;box-shadow:0 0 0 3px #6366f112}textarea{resize:vertical;line-height:1.7;font-size:13px}input[readonly]{background:#f8f9fc;color:#64748b;font-size:12px}.hint,small{font-size:12px;line-height:1.7;color:#8791a3}.hint{margin:7px 0 0}.row{display:flex;gap:10px;margin-top:16px;align-items:center;flex-wrap:wrap}.row.end{justify-content:flex-end}.secondary{background:#fff;border-color:#dfe3ed;color:#526075}.secondary:hover{background:#f1f3f9}.text-button{padding:4px 0;background:transparent;color:#6366f1;font-size:12px}.text-button:hover{background:transparent;color:#4338ca}.label-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px}.label-row label{margin:0}
       .header-actions{display:flex;align-items:center;gap:8px}.header-actions .text-button{white-space:nowrap}.header-actions .icon-button{font-size:17px}.task-title{font-size:20px;font-weight:650;border:0;padding:8px 0}.task-description{min-height:250px;border:0;padding:8px 0;resize:vertical}.task-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.task-grid .field{margin:0}.settings-group{border-top:1px solid #edf0f5;padding-top:18px;margin-top:18px}.settings-group:first-child{border-top:0;padding-top:0;margin-top:0}.settings-group h4{margin:0 0 12px;font-size:14px}.inline-control{display:flex;gap:8px}.inline-control>*:first-child{flex:1;min-width:0}.inline-control button{white-space:nowrap}.link-note{padding:10px 12px;border:1px solid #e5e8f0;border-radius:9px;background:#f8f9fc;font-size:12px;color:#64748b;overflow-wrap:anywhere}@media(max-width:520px){.task-grid{grid-template-columns:1fr}.header-actions .text-button{font-size:11px}}
       .quick-card{padding:0;overflow:hidden}.quick-head,.quick-foot{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid #e5e8f0}.quick-head strong{font-size:16px;color:#536078}.quick-head small{color:#9ca3af}.quick-body{padding:18px}.quick-body .task-title{font-size:23px;width:100%;border:0;box-shadow:none}.quick-body .task-description{min-height:205px;width:100%;border:0;box-shadow:none}.quick-source{display:flex;justify-content:space-between;gap:10px;padding:12px;border:1px solid #e5e8f0;background:#f6f7f9;border-radius:9px;font-size:12px;color:#667085}.quick-source strong{color:#344054}.quick-assignee{display:flex;align-items:center;gap:10px;margin:14px 0;color:#667085}.quick-avatar{display:grid;place-items:center;width:31px;height:31px;border-radius:50%;background:#eceff2;color:#4b5563;font-weight:700}.quick-options{display:flex;flex-wrap:wrap;gap:8px}.quick-options select,.quick-options .more-button{width:auto;max-width:230px;border-radius:24px;padding:9px 12px;font-size:12px}.quick-dates{margin-top:14px;border-top:1px solid #edf0f5;padding-top:12px}.quick-dates summary{font-size:12px;color:#667085;cursor:pointer}.quick-foot{border-top:1px solid #e5e8f0;border-bottom:0;gap:8px;flex-wrap:wrap}.quick-foot label{display:flex;align-items:center;gap:6px;margin:0;font-weight:400;font-size:12px}.quick-foot input{width:17px;height:17px;accent-color:#4f46e5}.quick-foot .submit{width:auto;margin:0}.quick-foot .text-button{font-size:20px}.custom-server-panel{margin-top:10px;padding:12px;border:1px solid #e5e8f0;border-radius:9px;background:#f8f9fc}
@@ -756,8 +826,8 @@
             <p class="version">BugDone → Multica · v${SCRIPT_VERSION}</p>
           </section>
           <section id="view-processing" role="tabpanel" aria-labelledby="tab-processing" hidden>
-            <div class="section-intro"><div><div class="eyebrow">LOCAL HISTORY</div><h3>处理列表</h3></div><span id="processing-count" class="badge">共 0 条</span></div>
-            <div class="card"><p class="hint">这里记录本浏览器中已提交给 Multica-AI 的 Bug，仅保存在当前可用的脚本存储。删除只移除本地记录，不会删除 Multica 任务。</p><div id="processing-list"></div></div>
+            <div class="section-intro"><div><div class="eyebrow">LOCAL HISTORY</div><h3>处理列表</h3></div><div class="processing-actions"><button id="refresh-processing" class="text-button" type="button">刷新状态</button><span id="processing-count" class="badge">共 0 条</span></div></div>
+            <div class="card"><p class="hint">这里记录本浏览器中已提交给 Multica-AI 的 Bug。打开本栏会查询任务状态；删除只移除本地记录，不会删除 Multica 任务。</p><div id="processing-list"></div></div>
           </section>
         </div>
         <footer><p id="message" role="status" aria-live="polite">尚未提交 · 请先核对 Bug 详情。</p></footer>
@@ -819,6 +889,7 @@
       }
     });
     $('task-attachments').onclick = () => switchTab('bug', true);
+    $('refresh-processing').onclick = () => { void refreshProcessingStatuses(true); };
     $('agent-task').onchange = () => { $('submit').disabled = !$('agent-task').checked; if (!$('agent-task').checked) message('当前桥接只支持智能体任务。'); };
     $('open-multica').onclick = () => {
       // 桌面端注册 multica://；网页无法直接查询安装状态，用失焦和原生回执判断是否需要回退。

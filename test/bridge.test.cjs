@@ -8,7 +8,7 @@ const end = source.indexOf('  // 调试桩：');
 assert.ok(start >= 0 && end > start);
 assert.ok(!/\bmodule\b|\brequire\s*\(/.test(source));
 const bridge = new Function('return ' + source.slice(start, end) +
-  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey, listItems, buildIssueBody, bugTaskTitle, connectionCacheTag, needsCatalogRefresh, connectionBadge, verifyConnection };\n})();')();
+  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey, listItems, buildIssueBody, bugTaskTitle, connectionCacheTag, needsCatalogRefresh, connectionBadge, verifyConnection, lookupSubmittedIssue, issueStatusLabel, loadSubmittedStatuses };\n})();')();
 const id = '7603f73c983242c1811852a53b26e2c3';
 const c = { api: 'https://api.multica.ai', workspace: '11111111-1111-4111-8111-111111111111', token: 'test' };
 const bug = { BugId: id };
@@ -180,4 +180,51 @@ test('搜索失败或缓存任务不可访问时禁止创建', async () => {
     } }));
     assert.equal(posts, 0);
   }
+});
+test('处理列表优先按已保存任务 ID 查询最新状态', async () => {
+  const calls = [];
+  const item = { issueId: 'task-id', bugId: id };
+  const found = await bridge.lookupSubmittedIssue(async (method, path) => {
+    calls.push([method, path]);
+    return { status: 200, data: { id: 'task-id', title: `${bridge.marker(id)} 测试`, status: 'in_progress' } };
+  }, item);
+  assert.equal(found.status, 'in_progress');
+  assert.deepEqual(calls, [['GET', '/api/issues/task-id']]);
+  assert.equal(bridge.issueStatusLabel(found.status), '进行中');
+});
+test('旧记录没有任务 ID 时按查重标记查找，查不到时保持未知', async () => {
+  const paths = [];
+  const api = async (_, path) => {
+    paths.push(path);
+    return { status: 200, data: { issues: [{ id: 'found', title: `${bridge.marker(id)} 测试`, status: 'done' }] } };
+  };
+  const found = await bridge.lookupSubmittedIssue(api, { bugId: id });
+  assert.equal(found.id, 'found');
+  assert.equal(bridge.issueStatusLabel(found.status), '已完成');
+  assert.ok(paths[0].includes(encodeURIComponent(bridge.marker(id))));
+  assert.equal(bridge.issueStatusLabel('custom_state'), 'custom_state');
+  assert.equal(bridge.issueStatusLabel(null), '未知');
+});
+test('处理列表任务读取失败时不把失败当作未创建', async () => {
+  await assert.rejects(bridge.lookupSubmittedIssue(async () => ({ status: 403, data: null }),
+    { issueId: 'task-id', bugId: id }), /HTTP 403/);
+});
+test('处理列表只查询当前服务与工作区，并逐项报告状态或失败', async () => {
+  const items = [
+    { issueId: 'a', bugId: id, api: c.api, workspace: c.workspace },
+    { issueId: 'b', bugId: id, api: 'https://other.example', workspace: c.workspace },
+    { issueId: 'c', bugId: id, api: c.api, workspace: 'other-workspace' },
+    { issueId: 'd', bugId: id, api: c.api, workspace: c.workspace }
+  ];
+  const results = new Map(), paths = [];
+  await bridge.loadSubmittedStatuses(items, c, async (_, path) => {
+    paths.push(path);
+    if (path.endsWith('/d')) return { status: 403, data: null };
+    return { status: 200, data: { id: 'a', status: 'todo' } };
+  }, (item, result) => results.set(item.issueId, result));
+  assert.deepEqual(paths.sort(), ['/api/issues/a', '/api/issues/d']);
+  assert.equal(results.get('a').status, 'todo');
+  assert.equal(results.get('b').kind, 'unavailable');
+  assert.equal(results.get('c').kind, 'unavailable');
+  assert.equal(results.get('d').kind, 'error');
 });
