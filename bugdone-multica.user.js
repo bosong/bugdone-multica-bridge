@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      1.0.7
+// @version      1.0.8
 // @description  BugDone桥接Multica智能体
 // @updateURL    https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
 // @downloadURL  https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
@@ -251,7 +251,7 @@
   }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '1.0.7';
+  const SCRIPT_VERSION = '1.0.8';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }
@@ -831,6 +831,7 @@
       if (selected && focus) tab.focus();
     });
     root.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== `view-${name}`; });
+    $('bug-action-bar').hidden = name !== 'bug';
     if (name === 'processing') { renderProcessing(); void refreshProcessingStatuses(); }
   }
   function showSuccess(text) {
@@ -924,6 +925,7 @@
       .setting-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 0;border-bottom:1px solid #e5e8f0}.setting-row:last-child{border-bottom:0}.setting-copy{min-width:0}.setting-copy strong{display:block;font-size:13px;color:#273449}.setting-copy small{display:block;margin-top:4px}.setting-control{flex:none}.switch{position:relative;display:inline-flex;align-items:center;width:44px;height:26px;margin:0;cursor:pointer}.switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}.switch-track{width:44px;height:26px;border-radius:20px;background:#cbd5e1;transition:background .15s}.switch-track::after{content:"";display:block;width:20px;height:20px;margin:3px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #1e293b33;transition:transform .15s}.switch input:checked+.switch-track{background:#2563eb}.switch input:checked+.switch-track::after{transform:translateX(18px)}.switch input:focus-visible+.switch-track{outline:3px solid #93c5fd;outline-offset:2px}.segmented{display:flex;padding:3px;border:1px solid #dce1ec;border-radius:9px;background:#f1f3f6}.segmented button{padding:8px 12px;border:0;background:transparent;color:#64748b;font-size:12px;white-space:nowrap}.segmented button:hover{background:#e5eaf2}.segmented button[aria-pressed="true"]{background:#fff;color:#1e293b;box-shadow:0 1px 4px #1e293b1c}.settings-group>.hint{margin:0 0 4px}.settings-group .field>.hint{margin:4px 0 0}
       #task-extras>summary{display:none}.quick-foot #submit{margin-left:auto}.quick-source #task-source{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%}.quick-options select:hover{border-color:#b7becb}.quick-body .task-description:focus,.quick-body .task-title:focus{box-shadow:none}
       #count{margin:0 0 14px;font-size:12px;color:#8290a5}#warning{margin:10px 0 0;font-size:12px;line-height:1.7;color:#896a31}#handoff-title{margin:0;color:#334155;font-weight:600;overflow-wrap:anywhere}#handoff-meta{margin:8px 0 0}.target{display:grid;gap:4px;overflow-wrap:anywhere}.target small{font-size:11px;text-transform:uppercase;letter-spacing:.8px}.target strong{font-weight:500;font-size:13px}.divider{height:1px;background:#edf0f5;margin:14px 0}.check{display:flex;align-items:flex-start;gap:9px;font-weight:400;line-height:1.7;margin-top:17px}.check input{width:16px;height:16px;flex:none;margin:3px 0;accent-color:#3b82f6}.check span{font-size:12px;color:#66758b}.submit{width:100%;margin-top:16px}
+      .bug-action-bar{flex:none;display:flex;justify-content:flex-end;align-items:center;padding:12px 24px;background:#fff;border-top:1px solid #e7eaf1;box-shadow:0 -8px 20px #1e293b0a;z-index:1}
       footer{flex:none;padding:12px 24px;background:#fff;border-top:1px solid #e7eaf1}#message{white-space:pre-wrap;margin:0;font-size:12px;color:#64748b;overflow-wrap:anywhere;max-height:110px;overflow:auto;display:flex;align-items:flex-start;gap:8px}#message::before{content:"";width:9px;height:9px;flex:none;margin-top:4px;border-radius:50%;background:#94a3b8}.status-success::before{background:#22c55e!important}.status-warning::before{background:#eab308!important}.status-error::before{background:#ef4444!important}details summary{cursor:pointer;font-size:13px;font-weight:600;color:#536078}details textarea{margin-top:12px}.version{font-size:11px;color:#9aa3b2;text-align:center;margin:18px 0 0}
       #success{right:auto;bottom:auto;margin:0;z-index:2147483647}
       @media(max-width:760px){#panel[data-display="sidebar"]{width:min(520px,100vw)}}@media(max-width:520px){#panel{right:8px;top:8px;bottom:76px;width:calc(100vw - 16px);border-radius:15px}#panel[data-display="sidebar"]{top:0;right:0;bottom:0;width:100vw;height:100dvh;border-radius:0}header{padding:16px}.tabs{padding:0 16px;gap:22px;overflow-x:auto}.content{padding:16px}footer{padding:12px 16px}.card{padding:14px}.setting-row{align-items:flex-start}.setting-control{align-self:center}#launch{right:12px;bottom:16px}}
@@ -948,7 +950,6 @@
               <div class="field"><div class="label-row"><label for="description">提交内容预览（可编辑）</label><button id="restore" class="text-button">重新生成</button></div><textarea id="description" rows="13" placeholder="捕获详情后，将显示来源、只读分享、问题描述与附件链接。"></textarea></div>
             </div>
             <details class="card"><summary>手动导入 BugDone 响应</summary><p class="hint">自动捕获不可用时，可导入列表或详情接口的响应。</p><textarea id="json" rows="6" aria-label="BugDone 响应 JSON" placeholder="粘贴 Result / ReturnObj 格式 JSON，不要粘贴请求头或 Cookie"></textarea><div class="row"><button id="import" data-action class="secondary">导入响应</button></div></details>
-            <div class="row end"><button id="next">下一步：AI任务创建 →</button></div>
           </section>
           <section id="view-multica" role="tabpanel" aria-labelledby="tab-multica" hidden>
             <div class="card quick-card"><div class="quick-head"><strong>快速创建</strong><small>手动/自动</small></div><div class="quick-body"><input id="task-title" class="task-title" aria-label="任务标题" placeholder="任务标题"><textarea id="task-description" class="task-description" rows="7" aria-label="任务描述" placeholder="添加描述..."></textarea><div class="quick-source"><strong>🔗 当前浏览页面</strong><span id="task-source">来源将随任务保存</span></div><div class="quick-assignee"><span class="quick-avatar">M</span><span>连接后可选择智能体接收任务</span></div><div class="quick-options"><select id="task-status" aria-label="任务状态"><option value="todo">◯ 待办</option><option value="backlog">待整理</option><option value="in_progress">进行中</option><option value="in_review">待审核</option><option value="done">已完成</option><option value="blocked">已阻塞</option></select><select id="task-priority" aria-label="优先级"><option value="none">－ 无优先级</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="urgent">紧急</option></select><select id="agent" aria-label="处理智能体"><option value="">选择智能体</option></select><select id="task-project" aria-label="项目"><option value="">无项目</option></select><button id="task-more" class="secondary more-button" type="button" aria-label="更多选项">•••</button></div><details id="task-extras" class="quick-dates"><summary>更多选项</summary><div class="task-grid"><div class="field"><label for="task-label">标签</label><select id="task-label"><option value="">无标签</option></select></div><div class="field"><label for="task-start">开始日期</label><input id="task-start" type="date"></div><div class="field"><label for="task-due">截止日期</label><input id="task-due" type="date"></div></div></details></div><div class="quick-foot"><button id="task-attachments" class="text-button" type="button" title="查看 BugDone 附件" aria-label="查看 BugDone 附件">📎</button><label><input id="agent-task" type="checkbox" checked>智能体任务</label><label><input id="continue-create" type="checkbox">继续创建</label><button id="submit" data-action class="submit">创建任务 ↵</button></div></div>
@@ -965,6 +966,7 @@
             <div class="card"><p class="hint">这里记录本浏览器中已提交给 Multica-AI 的 Bug。打开本栏会查询任务状态；删除只移除本地记录，不会删除 Multica 任务。</p><div id="processing-list"></div></div>
           </section>
         </div>
+        <div id="bug-action-bar" class="bug-action-bar"><button id="next">下一步：AI任务创建 →</button></div>
         <footer><p id="message" role="status" aria-live="polite">尚未提交 · 请先核对 Bug 详情。</p></footer>
       </section>
       <div id="success" class="success" popover="manual" hidden role="status" aria-live="polite"><span class="success-mark">✓</span><div><strong>创建成功</strong><span class="success-copy"></span></div></div>`;
