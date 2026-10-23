@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      1.0.8
+// @version      1.0.9
 // @description  BugDone桥接Multica智能体
 // @updateURL    https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
 // @downloadURL  https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
@@ -147,6 +147,11 @@
     if (dueDate) body.due_date = dueDate;
     return body;
   }
+  function issueLabelState(issue, label) {
+    if (!label) return 'none';
+    if (!Array.isArray(issue?.labels)) return 'unknown';
+    return issue.labels.some(item => item?.id === label) ? 'applied' : 'missing';
+  }
   const owns = (issue, id) => typeof issue?.title === 'string' &&
     (issue.title.startsWith(marker(id) + ' ') || issue.title.endsWith(' ' + marker(id)));
   function cacheKey(c, id) { return `task:${VERSION}:${c.api}:${c.workspace}:${id}`; }
@@ -251,7 +256,7 @@
   }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '1.0.8';
+  const SCRIPT_VERSION = '1.0.9';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }
@@ -717,7 +722,8 @@
     renderAgentChoices({ ...c, agent, defaultAgent }, data.agents);
     if (!$('default-agent').value && $('default-agent').options.length > 1) $('default-agent').selectedIndex = 1;
     if (!$('agent').value && $('agent').options.length > 1) $('agent').selectedIndex = 1;
-    const label = data.labels.some(item => item.id === config.label) ? config.label : '';
+    // 目录可能暂时不完整；保留已保存的标签，避免刷新时把默认值写成空。
+    const label = config.label || '';
     fillSelect('default-label', data.labels, label, '不指定标签');
     fillSelect('task-label', data.labels, label, '无标签');
   }
@@ -806,17 +812,23 @@
     const taskText = `任务已创建并指派，执行状态请到 Multica 查看：${result.issue.identifier || ''}\n任务 ID：${result.issue.id}`;
     if (!result.existing) showSuccess(taskText);
     let bugDoneNote = result.existing ? '复用已有任务，BugDone 状态未自动修改。' : '', bugDoneWarning = false;
+    if (issueLabelState(result.issue, body.label_ids?.[0]) === 'missing') {
+      bugDoneWarning = true;
+      bugDoneNote += result.existing
+        ? '\n复用任务未带当前默认标签；查重不会修改已有任务，请在 Multica 中添加。'
+        : '\nMultica 创建响应未包含所选标签，请在任务中核对；脚本没有自动重复创建。';
+    }
     if (!result.existing) {
       try {
         const status = await startBugDoneProcessing(b, bugDoneForm);
         if (status.kind === 'started' || status.kind === 'already-processing') {
           const captured = bugs.get(b.BugId);
           if (captured) { captured.StrBugStatus = '处理中'; renderBugs(); }
-          bugDoneNote = status.kind === 'started' ? 'BugDone 状态已更新为「处理中」。' : 'BugDone 已是「处理中」，无需重复修改。';
-        } else { bugDoneWarning = true; bugDoneNote = `BugDone 当前为「${status.state}」，未自动改动。`; }
+          bugDoneNote += (bugDoneNote ? '\n' : '') + (status.kind === 'started' ? 'BugDone 状态已更新为「处理中」。' : 'BugDone 已是「处理中」，无需重复修改。');
+        } else { bugDoneWarning = true; bugDoneNote += (bugDoneNote ? '\n' : '') + `BugDone 当前为「${status.state}」，未自动改动。`; }
       } catch (error) {
         bugDoneWarning = true;
-        bugDoneNote = `BugDone 状态同步未确认：${error.message}。Multica 任务已创建，请在 BugDone 中核对。`;
+        bugDoneNote += (bugDoneNote ? '\n' : '') + `BugDone 状态同步未确认：${error.message}。Multica 任务已创建，请在 BugDone 中核对。`;
         debug('BugDone 状态同步失败', { errorType: error.name }, 'warn');
       }
     }
@@ -1133,6 +1145,11 @@
     }));
     for (const id of ['default-project', 'default-label']) $(id).addEventListener('change', () => {
       const taskId = id === 'default-project' ? 'task-project' : 'task-label'; $(taskId).value = $(id).value;
+      if (id === 'default-label') {
+        config.label = $(id).value;
+        try { writeValue('config', { ...config }); message('默认标签已保存。', 'success'); }
+        catch (error) { message('默认标签保存失败。', 'error'); }
+      }
     });
     $('hide-native-ai').addEventListener('change', () => { config.hideNativeAI = $('hide-native-ai').checked; setNativeAIVisibility(config.hideNativeAI); try { writeValue('config', { ...config }); message(config.hideNativeAI ? '已隐藏 BugDone 原有 AI 按钮。' : '已显示 BugDone 原有 AI 按钮。', 'success'); } catch (e) { message('AI 按钮显示设置保存失败。', 'error'); } });
     for (const [id, mode] of [['mode-sidebar', 'sidebar'], ['mode-floating', 'floating']]) $(id).onclick = () => {
