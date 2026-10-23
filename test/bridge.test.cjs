@@ -8,7 +8,7 @@ const end = source.indexOf('  // 调试桩：');
 assert.ok(start >= 0 && end > start);
 assert.ok(!/\bmodule\b|\brequire\s*\(/.test(source));
 const bridge = new Function('return ' + source.slice(start, end) +
-  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey, listItems, buildIssueBody, bugTaskTitle, connectionCacheTag, needsCatalogRefresh, connectionBadge, verifyConnection, lookupSubmittedIssue, issueStatusLabel, loadSubmittedStatuses, shortcutFromEvent, shortcutMatches };\n})();')();
+  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey, listItems, buildIssueBody, bugTaskTitle, connectionCacheTag, needsCatalogRefresh, connectionBadge, verifyConnection, lookupSubmittedIssue, issueStatusLabel, loadSubmittedStatuses, shortcutFromEvent, shortcutMatches, normalizeShortcutConfig, startBugDoneProcessing };\n})();')();
 const id = '7603f73c983242c1811852a53b26e2c3';
 const c = { api: 'https://api.multica.ai', workspace: '11111111-1111-4111-8111-111111111111', token: 'test' };
 const bug = { BugId: id };
@@ -21,6 +21,41 @@ test('快捷键须包含主修饰键，并能准确区分组合', () => {
   assert.equal(bridge.shortcutMatches({ ...event, shiftKey: false }, 'Alt+Shift+M'), false);
   assert.equal(bridge.shortcutFromEvent({ ...event, altKey: false }), '');
   assert.equal(bridge.shortcutFromEvent({ ...event, key: 'Shift' }), '');
+});
+test('升级时将旧默认键迁移到 Ctrl+Shift+M，保留主动设置的组合', () => {
+  assert.equal(bridge.normalizeShortcutConfig({ shortcut: 'Alt+Shift+M' }).shortcut, 'Ctrl+Shift+M');
+  assert.equal(bridge.normalizeShortcutConfig({ shortcut: 'Alt+Shift+M', shortcutCustomized: true }).shortcut, 'Alt+Shift+M');
+  assert.equal(bridge.normalizeShortcutConfig({ shortcut: 'Meta+Shift+K', shortcutCustomized: true }).shortcut, 'Meta+Shift+K');
+});
+test('Multica 成功后只把同一待处理 Bug 改为处理中，并再次读取确认', async () => {
+  const calls = [];
+  const responses = [
+    { Result: 1, ReturnObj: { BugId: id, StrBugStatus: '待处理' } },
+    { Result: 1, ReturnObj: null },
+    { Result: 1, ReturnObj: { BugId: id, StrBugStatus: '处理中' } }
+  ];
+  const result = await bridge.startBugDoneProcessing({ BugId: id }, async params => {
+    calls.push(params); return responses.shift();
+  });
+  assert.deepEqual(result, { kind: 'started', state: '处理中' });
+  assert.deepEqual(calls, [
+    { Method: 'getBugInfo', bugId: id },
+    { Method: 'addBugAssign', bugId: id, actionType: 'toprocessing', reason: '' },
+    { Method: 'getBugInfo', bugId: id }
+  ]);
+});
+test('BugDone 已处理中或进入其他流程时不重复操作；更新失败明确报错', async () => {
+  const calls = [];
+  const read = state => async params => {
+    calls.push(params); return { Result: 1, ReturnObj: { BugId: id, StrBugStatus: state } };
+  };
+  assert.deepEqual(await bridge.startBugDoneProcessing({ BugId: id }, read('处理中')), { kind: 'already-processing', state: '处理中' });
+  assert.deepEqual(await bridge.startBugDoneProcessing({ BugId: id }, read('待审核')), { kind: 'skipped', state: '待审核' });
+  assert.equal(calls.length, 2);
+  await assert.rejects(bridge.startBugDoneProcessing({ BugId: id }, async () => ({ Result: 0, Message: '无权限' })), /无权限/);
+  await assert.rejects(bridge.startBugDoneProcessing({ BugId: id }, async params => params.Method === 'getBugInfo'
+    ? { Result: 1, ReturnObj: { BugId: 'other', StrBugStatus: '待处理' } }
+    : { Result: 1 }), /Bug ID/);
 });
 test('连接列表兼容数组与包装结果；任务选项正确写入创建请求', () => {
   assert.deepEqual(bridge.listItems({ workspaces: [{ id: 'w', name: '研发' }] }, 'workspaces'), [{ id: 'w', name: '研发' }]);

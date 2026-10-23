@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      1.0.6
+// @version      1.0.7
 // @description  BugDone桥接Multica智能体
 // @updateURL    https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
 // @downloadURL  https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
@@ -218,16 +218,40 @@
     set(key, { id: issue.id });
     return { issue, existing: r.status === 409 };
   }
-  const DEFAULT_SHORTCUT = 'Alt+Shift+M';
+  const DEFAULT_SHORTCUT = 'Ctrl+Shift+M';
   function shortcutFromEvent(event) {
     const key = String(event.key || '').toUpperCase();
     if (!/^[A-Z0-9]$/.test(key) || !(event.altKey || event.ctrlKey || event.metaKey)) return '';
     return [event.ctrlKey && 'Ctrl', event.altKey && 'Alt', event.metaKey && 'Meta', event.shiftKey && 'Shift', key].filter(Boolean).join('+');
   }
   function shortcutMatches(event, shortcut) { return !!shortcut && shortcutFromEvent(event) === shortcut; }
+  function normalizeShortcutConfig(saved) {
+    return saved.shortcut === 'Alt+Shift+M' && saved.shortcutCustomized !== true
+      ? { ...saved, shortcut: DEFAULT_SHORTCUT } : saved;
+  }
+  async function startBugDoneProcessing(bug, postForm) {
+    const bugId = String(bug?.BugId || '').toLowerCase();
+    if (!BUGID.test(bugId)) throw Error('BugDone Bug ID 无效');
+    const read = async () => {
+      const response = await postForm({ Method: 'getBugInfo', bugId });
+      if (response?.Result !== 1) throw Error(`BugDone 读取状态失败：${response?.Message || '未知错误'}`);
+      const detail = response.ReturnObj;
+      if (String(detail?.BugId || '').toLowerCase() !== bugId) throw Error('BugDone 返回的 Bug ID 不匹配');
+      if (!detail.StrBugStatus) throw Error('BugDone 未返回当前状态');
+      return detail.StrBugStatus;
+    };
+    const state = await read();
+    if (state === '处理中') return { kind: 'already-processing', state };
+    if (state !== '待处理') return { kind: 'skipped', state };
+    const changed = await postForm({ Method: 'addBugAssign', bugId, actionType: 'toprocessing', reason: '' });
+    if (changed?.Result !== 1) throw Error(`BugDone 开始处理失败：${changed?.Message || '未知错误'}`);
+    const verified = await read();
+    if (verified !== '处理中') throw Error(`BugDone 状态更新未确认：当前为${verified}`);
+    return { kind: 'started', state: verified };
+  }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '1.0.6';
+  const SCRIPT_VERSION = '1.0.7';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }
@@ -265,11 +289,12 @@
   config.hideNativeAI = true;
   config.displayMode = 'floating';
   config.shortcut = DEFAULT_SHORTCUT;
+  config.shortcutCustomized = false;
   let submittedBugs = [];
   const processingStates = new WeakMap(), processingRows = new Map();
   let processingRefreshPromise = null, processingRefreshAt = 0, processingRefreshContext = '';
   let launchPosition = readValue('launchPosition', null);
-  config = { ...config, ...(readValue('config', config) || {}) };
+  config = normalizeShortcutConfig({ ...config, ...(readValue('config', config) || {}) });
   if (!['floating', 'sidebar'].includes(config.displayMode)) config.displayMode = 'floating';
   if (!/^(?=.*(?:Ctrl|Alt|Meta))(?:Ctrl\+)?(?:Alt\+)?(?:Meta\+)?(?:Shift\+)?[A-Z0-9]$/.test(config.shortcut || '')) config.shortcut = DEFAULT_SHORTCUT;
   let connectionPhase = 'idle';
@@ -473,7 +498,23 @@
   }
   function message(text, kind = 'info') { const el = $('message'); el.textContent = text; el.className = `status-${kind}`; }
   function settings() {
-    return validateConfig({ api: $('api').value.trim(), workspace: $('workspace').value, workspaceAlias: $('workspace').selectedOptions[0]?.textContent || '', token: $('token').value, project: $('default-project').value, projectAlias: $('default-project').selectedOptions[0]?.textContent || '', agent: $('agent').value, defaultAgent: $('default-agent').value, label: $('default-label').value, hideNativeAI: $('hide-native-ai').checked, displayMode: config.displayMode, shortcut: config.shortcut });
+    return validateConfig({ api: $('api').value.trim(), workspace: $('workspace').value, workspaceAlias: $('workspace').selectedOptions[0]?.textContent || '', token: $('token').value, project: $('default-project').value, projectAlias: $('default-project').selectedOptions[0]?.textContent || '', agent: $('agent').value, defaultAgent: $('default-agent').value, label: $('default-label').value, hideNativeAI: $('hide-native-ai').checked, displayMode: config.displayMode, shortcut: config.shortcut, shortcutCustomized: config.shortcutCustomized });
+  }
+  async function bugDoneForm(params) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch('/Service/Bugdone/BugAPI.ashx', {
+        method: 'POST', credentials: 'same-origin', redirect: 'error',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: new URLSearchParams(params).toString(), signal: controller.signal
+      });
+      if (!response.ok) throw Error(`HTTP ${response.status}`);
+      try { return await response.json(); } catch { throw Error('响应不是有效 JSON，请检查 BugDone 登录状态'); }
+    } catch (error) {
+      if (error.name === 'AbortError') throw Error('BugDone 请求超时，状态可能已改变，请刷新确认');
+      throw error;
+    } finally { clearTimeout(timer); }
   }
   function request(c) {
     return (method, path, body) => new Promise((resolve, reject) => {
@@ -763,8 +804,24 @@
     rememberSubmitted(b, result.issue, c);
     renderBugs(); renderProcessing();
     const taskText = `任务已创建并指派，执行状态请到 Multica 查看：${result.issue.identifier || ''}\n任务 ID：${result.issue.id}`;
-    message(result.existing ? `已找到并复用已有任务，未重复创建：${result.issue.identifier || ''}\n任务 ID：${result.issue.id}` : taskText, result.existing ? 'warning' : 'success');
     if (!result.existing) showSuccess(taskText);
+    let bugDoneNote = result.existing ? '复用已有任务，BugDone 状态未自动修改。' : '', bugDoneWarning = false;
+    if (!result.existing) {
+      try {
+        const status = await startBugDoneProcessing(b, bugDoneForm);
+        if (status.kind === 'started' || status.kind === 'already-processing') {
+          const captured = bugs.get(b.BugId);
+          if (captured) { captured.StrBugStatus = '处理中'; renderBugs(); }
+          bugDoneNote = status.kind === 'started' ? 'BugDone 状态已更新为「处理中」。' : 'BugDone 已是「处理中」，无需重复修改。';
+        } else { bugDoneWarning = true; bugDoneNote = `BugDone 当前为「${status.state}」，未自动改动。`; }
+      } catch (error) {
+        bugDoneWarning = true;
+        bugDoneNote = `BugDone 状态同步未确认：${error.message}。Multica 任务已创建，请在 BugDone 中核对。`;
+        debug('BugDone 状态同步失败', { errorType: error.name }, 'warn');
+      }
+    }
+    const creationText = result.existing ? `已找到并复用已有任务，未重复创建：${result.issue.identifier || ''}\n任务 ID：${result.issue.id}` : taskText;
+    message(`${creationText}\n${bugDoneNote}`, result.existing || bugDoneWarning ? 'warning' : 'success');
   }
   function switchTab(name, focus = false) {
     root.querySelectorAll('[role="tab"]').forEach(tab => {
@@ -779,7 +836,11 @@
   function showSuccess(text) {
     const box = $('success'); box.querySelector('.success-copy').textContent = text;
     box.hidden = false; box.classList.remove('success-pop'); void box.offsetWidth; box.classList.add('success-pop');
-    clearTimeout(showSuccess.timer); showSuccess.timer = setTimeout(() => { box.hidden = true; }, 5500);
+    try { if (typeof box.showPopover === 'function' && !box.matches(':popover-open')) box.showPopover(); } catch (_) { /* 旧版 WebView 使用最高层级兜底 */ }
+    clearTimeout(showSuccess.timer); showSuccess.timer = setTimeout(() => {
+      try { if (box.matches(':popover-open')) box.hidePopover(); } catch (_) {}
+      box.hidden = true;
+    }, 5500);
   }
   function renderProcessing() {
     const list = $('processing-list'); if (!list) return; list.replaceChildren(); processingRows.clear();
@@ -864,9 +925,9 @@
       #task-extras>summary{display:none}.quick-foot #submit{margin-left:auto}.quick-source #task-source{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%}.quick-options select:hover{border-color:#b7becb}.quick-body .task-description:focus,.quick-body .task-title:focus{box-shadow:none}
       #count{margin:0 0 14px;font-size:12px;color:#8290a5}#warning{margin:10px 0 0;font-size:12px;line-height:1.7;color:#896a31}#handoff-title{margin:0;color:#334155;font-weight:600;overflow-wrap:anywhere}#handoff-meta{margin:8px 0 0}.target{display:grid;gap:4px;overflow-wrap:anywhere}.target small{font-size:11px;text-transform:uppercase;letter-spacing:.8px}.target strong{font-weight:500;font-size:13px}.divider{height:1px;background:#edf0f5;margin:14px 0}.check{display:flex;align-items:flex-start;gap:9px;font-weight:400;line-height:1.7;margin-top:17px}.check input{width:16px;height:16px;flex:none;margin:3px 0;accent-color:#3b82f6}.check span{font-size:12px;color:#66758b}.submit{width:100%;margin-top:16px}
       footer{flex:none;padding:12px 24px;background:#fff;border-top:1px solid #e7eaf1}#message{white-space:pre-wrap;margin:0;font-size:12px;color:#64748b;overflow-wrap:anywhere;max-height:110px;overflow:auto;display:flex;align-items:flex-start;gap:8px}#message::before{content:"";width:9px;height:9px;flex:none;margin-top:4px;border-radius:50%;background:#94a3b8}.status-success::before{background:#22c55e!important}.status-warning::before{background:#eab308!important}.status-error::before{background:#ef4444!important}details summary{cursor:pointer;font-size:13px;font-weight:600;color:#536078}details textarea{margin-top:12px}.version{font-size:11px;color:#9aa3b2;text-align:center;margin:18px 0 0}
+      #success{right:auto;bottom:auto;margin:0;z-index:2147483647}
       @media(max-width:760px){#panel[data-display="sidebar"]{width:min(520px,100vw)}}@media(max-width:520px){#panel{right:8px;top:8px;bottom:76px;width:calc(100vw - 16px);border-radius:15px}#panel[data-display="sidebar"]{top:0;right:0;bottom:0;width:100vw;height:100dvh;border-radius:0}header{padding:16px}.tabs{padding:0 16px;gap:22px;overflow-x:auto}.content{padding:16px}footer{padding:12px 16px}.card{padding:14px}.setting-row{align-items:flex-start}.setting-control{align-self:center}#launch{right:12px;bottom:16px}}
       </style>
-      <div id="success" class="success" hidden role="status" aria-live="polite"><span class="success-mark">✓</span><div><strong>创建成功</strong><span class="success-copy"></span></div></div>
       <button id="launch" aria-expanded="false" aria-controls="panel"><img src="/Templates/Default/Images/ai.webp" alt=""><span class="launch-text">Multica-AI · 未配置</span><span class="status-dot" aria-hidden="true"></span></button>
       <section id="panel" role="dialog" aria-label="Multica-AI Bug 工作台" hidden>
         <header><div class="brand"><img class="brand-icon" src="/Templates/Default/Images/ai.webp" alt=""><div><h2>Multica-AI</h2><small>BugDone 智能体工作台</small></div></div><div class="header-actions"><button id="open-multica" class="text-button">打开 Multica</button><button id="refresh-connection" data-action class="icon-button" title="刷新连接" aria-label="刷新连接">↻</button><button id="close" class="icon-button" aria-label="关闭面板">×</button></div></header>
@@ -896,7 +957,7 @@
             <div class="section-intro"><div><div class="eyebrow">PREFERENCES</div><h3>设置</h3></div></div>
             <div class="card"><div class="settings-group"><h4>基础配置</h4><div class="field"><label for="api">API 服务根地址</label><select id="api"></select><p class="hint">选择官方服务，或添加你自己的 Multica 服务。</p><div id="custom-server-panel" class="custom-server-panel" hidden><label for="custom-api">添加自建服务器</label><div class="inline-control"><input id="custom-api" type="url" placeholder="https://your-multica.example"><button id="add-api" class="secondary">添加</button></div></div></div><div class="field"><label for="token">访问令牌（API Token）</label><input id="token" type="password" autocomplete="off"><p class="hint">用于连接 Multica，仅保存在当前站点的本地存储。</p></div><div class="row"><button id="connect" data-action>手动连接 / 刷新</button></div></div>
               <div class="settings-group"><h4>任务默认配置</h4><div class="field"><label for="workspace">默认工作区</label><select id="workspace"><option value="">请先连接</option></select><p class="hint">新任务使用这个工作区，可随时切换。</p></div><div class="field"><label for="default-project">默认项目</label><select id="default-project"><option value="">请先连接</option></select><p class="hint">预先填入任务创建页，提交前仍可修改。</p></div><div class="field"><label for="default-agent">默认处理智能体</label><select id="default-agent"><option value="">请先连接</option></select><p class="hint">新任务默认指派给这位智能体。</p></div><div class="field"><label for="default-label">默认标签</label><select id="default-label"><option value="">不指定标签</option></select><p class="hint">新任务默认使用的标签，可留空。</p></div></div>
-              <div class="settings-group"><h4>UI 设置</h4><div class="setting-row"><div class="setting-copy"><strong>打开任务面板快捷键</strong><small>在当前网页快速打开 AI 任务创建</small></div><div class="setting-control shortcut-control"><input id="shortcut" type="text" readonly aria-label="打开任务面板快捷键"><button id="edit-shortcut" class="secondary" type="button">修改</button><button id="reset-shortcut" class="secondary" type="button">恢复默认</button></div></div><div class="setting-row"><div class="setting-copy"><strong>主面板显示样式</strong><small>选择工作台以侧边栏或浮窗方式显示</small></div><div class="setting-control segmented" role="group" aria-label="主面板显示样式"><button id="mode-sidebar" type="button" aria-pressed="false">侧边栏</button><button id="mode-floating" type="button" aria-pressed="true">浮窗</button></div></div><div class="setting-row"><div class="setting-copy"><strong>隐藏 BugDone 原有 AI 按钮</strong><small>隐藏页面内置的 AI 入口（openIntelligentTracking）</small></div><label class="switch setting-control" aria-label="隐藏 BugDone 原有 AI 按钮"><input type="checkbox" id="hide-native-ai"><span class="switch-track" aria-hidden="true"></span></label></div></div><div class="row"><button id="save" data-action>保存设置</button></div><p class="hint">自建服务器还需允许油猴或 Mac App 网络桥访问。</p></div>
+              <div class="settings-group"><h4>UI 设置</h4><div class="setting-row"><div class="setting-copy"><strong>打开／关闭任务面板快捷键</strong><small id="shortcut-description">在当前网页按快捷键打开或关闭面板</small></div><div class="setting-control shortcut-control"><input id="shortcut" type="text" readonly aria-label="当前任务面板快捷键"><button id="edit-shortcut" class="secondary" type="button">修改</button><button id="reset-shortcut" class="secondary" type="button">恢复默认</button></div></div><div class="setting-row"><div class="setting-copy"><strong>主面板显示样式</strong><small>选择工作台以侧边栏或浮窗方式显示</small></div><div class="setting-control segmented" role="group" aria-label="主面板显示样式"><button id="mode-sidebar" type="button" aria-pressed="false">侧边栏</button><button id="mode-floating" type="button" aria-pressed="true">浮窗</button></div></div><div class="setting-row"><div class="setting-copy"><strong>隐藏 BugDone 原有 AI 按钮</strong><small>隐藏页面内置的 AI 入口（openIntelligentTracking）</small></div><label class="switch setting-control" aria-label="隐藏 BugDone 原有 AI 按钮"><input type="checkbox" id="hide-native-ai"><span class="switch-track" aria-hidden="true"></span></label></div></div><div class="row"><button id="save" data-action>保存设置</button></div><p class="hint">自建服务器还需允许油猴或 Mac App 网络桥访问。</p></div>
             <p class="version">BugDone → Multica · v${SCRIPT_VERSION}</p>
           </section>
           <section id="view-processing" role="tabpanel" aria-labelledby="tab-processing" hidden>
@@ -905,7 +966,8 @@
           </section>
         </div>
         <footer><p id="message" role="status" aria-live="polite">尚未提交 · 请先核对 Bug 详情。</p></footer>
-      </section>`;
+      </section>
+      <div id="success" class="success" popover="manual" hidden role="status" aria-live="polite"><span class="success-mark">✓</span><div><strong>创建成功</strong><span class="success-copy"></span></div></div>`;
     renderServers();
     $('token').value = config.token || '';
     setConnectionPhase('idle');
@@ -918,7 +980,12 @@
     fillSelect('task-label', catalog.labels || [], config.label, '无标签');
     $('hide-native-ai').checked = config.hideNativeAI !== false;
     applyPanelMode(config.displayMode);
-    $('shortcut').value = config.shortcut.replaceAll('+', ' + ');
+    function showShortcut() {
+      const label = config.shortcut.replaceAll('+', ' + ');
+      $('shortcut').value = label;
+      $('shortcut-description').textContent = `在当前网页按 ${label} 打开或关闭面板`;
+    }
+    showShortcut();
     const launch = $('launch');
     if (launchPosition && Number.isFinite(Number(launchPosition.left)) && Number.isFinite(Number(launchPosition.top))) {
       launch.style.left = `${Number(launchPosition.left)}px`; launch.style.top = `${Number(launchPosition.top)}px`; launch.style.right = 'auto'; launch.style.bottom = 'auto';
@@ -962,24 +1029,30 @@
     $('task-more').onclick = () => { $('task-extras').open = !$('task-extras').open; };
     let capturingShortcut = false;
     $('edit-shortcut').onclick = () => { capturingShortcut = true; $('shortcut').value = '请按快捷键…'; $('shortcut').focus(); };
-    $('shortcut').onkeydown = event => {
-      event.stopPropagation();
-      if (!capturingShortcut) return;
+    $('shortcut').onblur = () => { if (capturingShortcut) { capturingShortcut = false; showShortcut(); } };
+    $('reset-shortcut').onclick = () => { capturingShortcut = false; config.shortcut = DEFAULT_SHORTCUT; config.shortcutCustomized = false; showShortcut(); writeValue('config', { ...config }); message('快捷键已恢复默认。', 'success'); };
+    window.addEventListener('keydown', event => {
+      if (event.repeat || event.isComposing) return;
+      if (capturingShortcut) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (event.key === 'Escape') { capturingShortcut = false; showShortcut(); return; }
+        const shortcut = shortcutFromEvent(event);
+        if (!shortcut) return;
+        config.shortcut = shortcut;
+        config.shortcutCustomized = true;
+        capturingShortcut = false;
+        showShortcut();
+        writeValue('config', { ...config });
+        message(`快捷键已保存：${$('shortcut').value}`, 'success');
+        return;
+      }
+      if (!shortcutMatches(event, config.shortcut)) return;
       event.preventDefault();
-      if (event.key === 'Escape') { capturingShortcut = false; $('shortcut').value = config.shortcut.replaceAll('+', ' + '); return; }
-      const shortcut = shortcutFromEvent(event);
-      if (!shortcut) { message('请按 Ctrl、Alt 或 Command，加字母或数字键。', 'warning'); return; }
-      config.shortcut = shortcut;
-      capturingShortcut = false;
-      $('shortcut').value = shortcut.replaceAll('+', ' + ');
-      writeValue('config', { ...config });
-      message(`快捷键已保存：${$('shortcut').value}`, 'success');
-    };
-    $('shortcut').onblur = () => { if (capturingShortcut) { capturingShortcut = false; $('shortcut').value = config.shortcut.replaceAll('+', ' + '); } };
-    $('reset-shortcut').onclick = () => { capturingShortcut = false; config.shortcut = DEFAULT_SHORTCUT; $('shortcut').value = DEFAULT_SHORTCUT.replaceAll('+', ' + '); writeValue('config', { ...config }); message('快捷键已恢复默认。', 'success'); };
-    document.addEventListener('keydown', event => {
-      if (shortcutMatches(event, config.shortcut)) { event.preventDefault(); openPanel(); switchTab('multica', true); }
-    });
+      event.stopImmediatePropagation();
+      if ($('launch').getAttribute('aria-expanded') === 'true') closePanel();
+      else { openPanel(); switchTab('multica', true); }
+    }, true);
     $('task-attachments').onclick = () => switchTab('bug', true);
     $('refresh-processing').onclick = () => { void refreshProcessingStatuses(true); };
     $('agent-task').onchange = () => { $('submit').disabled = !$('agent-task').checked; if (!$('agent-task').checked) message('当前桥接只支持智能体任务。'); };
