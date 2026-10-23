@@ -6,11 +6,11 @@
 
 ![侧边栏与 UI 设置预览](./assets/sidebar-preview.png)
 
-*界面预览由当前脚本生成。任务标题、描述、项目、智能体和来源链接均为虚构演示数据。设置中可切换侧边栏与浮窗模式。*
+*界面预览由当前脚本生成。任务标题、描述、项目、智能体和来源链接均为虚构演示数据。设置中可切换侧边栏抽屉与浮窗模式；桌面宽度下，抽屉打开时会收窄网页内容，关闭后恢复。打开任务面板的快捷键默认为 Alt + Shift + M，可在 UI 设置中修改或恢复默认。*
 
 ## 安装
 
-1. 从 [脚本安装地址](https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js) 安装 v1.0.4 到 Tampermonkey，打开并登录 BugDone。若已安装的旧版不含 `@updateURL`，需手动安装一次；之后可检查更新。
+1. 从 [脚本安装地址](https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js) 安装 v1.0.5 到 Tampermonkey，打开并登录 BugDone。若已安装的旧版不含 `@updateURL`，需手动安装一次；之后可检查更新。
 2. 打开某个 Bug 详情，点击右下角 **Multica-AI** 入口按钮；按钮文字会显示当前连接状态。
 3. 在设置的 API 服务下拉框中选择官方服务，或选择“添加自建服务器”后填写地址；再填写 API Token。脚本会自动读取并缓存工作区、项目、智能体和标签。以后启动直接恢复缓存，只有缓存缺失、Token 变化或手动刷新时才请求这些列表。
 4. 在 Bug 详情核对捕获内容，点击 **下一步：AI任务创建**，编辑任务标题、描述、状态、优先级、智能体、项目、标签或有效日期，然后创建任务。第一栏生成的标题以 `[BugDone] #编号` 开头，并在末尾带有用于查重的 Bug ID 标记。第二栏显示的标题和描述会原样提交；若删掉标题中的查重标记，脚本会阻止提交并提示重新生成。

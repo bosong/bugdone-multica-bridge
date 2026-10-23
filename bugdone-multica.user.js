@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      1.0.4
+// @version      1.0.5
 // @description  BugDone桥接Multica智能体
 // @updateURL    https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
 // @downloadURL  https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
@@ -218,9 +218,16 @@
     set(key, { id: issue.id });
     return { issue, existing: r.status === 409 };
   }
+  const DEFAULT_SHORTCUT = 'Alt+Shift+M';
+  function shortcutFromEvent(event) {
+    const key = String(event.key || '').toUpperCase();
+    if (!/^[A-Z0-9]$/.test(key) || !(event.altKey || event.ctrlKey || event.metaKey)) return '';
+    return [event.ctrlKey && 'Ctrl', event.altKey && 'Alt', event.metaKey && 'Meta', event.shiftKey && 'Shift', key].filter(Boolean).join('+');
+  }
+  function shortcutMatches(event, shortcut) { return !!shortcut && shortcutFromEvent(event) === shortcut; }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '1.0.4';
+  const SCRIPT_VERSION = '1.0.5';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }
@@ -257,12 +264,14 @@
   let config = { api: 'https://api.multica.ai', workspace: '', workspaceAlias: '', token: '', agent: '', defaultAgent: '', project: '', projectAlias: '', label: '' };
   config.hideNativeAI = true;
   config.displayMode = 'floating';
+  config.shortcut = DEFAULT_SHORTCUT;
   let submittedBugs = [];
   const processingStates = new WeakMap(), processingRows = new Map();
   let processingRefreshPromise = null, processingRefreshAt = 0, processingRefreshContext = '';
   let launchPosition = readValue('launchPosition', null);
   config = { ...config, ...(readValue('config', config) || {}) };
   if (!['floating', 'sidebar'].includes(config.displayMode)) config.displayMode = 'floating';
+  if (!/^(?=.*(?:Ctrl|Alt|Meta))(?:Ctrl\+)?(?:Alt\+)?(?:Meta\+)?(?:Shift\+)?[A-Z0-9]$/.test(config.shortcut || '')) config.shortcut = DEFAULT_SHORTCUT;
   let connectionPhase = 'idle';
   function setConnectionPhase(phase, expectedTag) {
     if (expectedTag && root && expectedTag !== connectionCacheTag($('api').value, $('token').value)) return;
@@ -303,11 +312,53 @@
     setTimeout(() => observer.disconnect(), 15000);
   }
   const $ = id => root.getElementById(id);
+  let pageLayoutSnapshot = null, layoutRestoreTimer = 0, panelCloseTimer = 0;
+  function syncPageLayout(open) {
+    const html = document.documentElement;
+    const shift = open && config.displayMode === 'sidebar' && window.innerWidth > 760
+      ? Math.min(520, window.innerWidth - 320) : 0;
+    clearTimeout(layoutRestoreTimer);
+    if (shift) {
+      if (!pageLayoutSnapshot) pageLayoutSnapshot = { width: html.style.width, transition: html.style.transition };
+      html.style.transition = pageLayoutSnapshot.transition ? `${pageLayoutSnapshot.transition}, width .26s ease` : 'width .26s ease';
+      html.style.width = `calc(100% - ${shift}px)`;
+    } else if (pageLayoutSnapshot) {
+      html.style.width = pageLayoutSnapshot.width;
+      layoutRestoreTimer = setTimeout(() => {
+        if (!pageLayoutSnapshot) return;
+        html.style.transition = pageLayoutSnapshot.transition;
+        pageLayoutSnapshot = null;
+      }, 270);
+    }
+  }
+  function openPanel() {
+    const panel = $('panel');
+    clearTimeout(panelCloseTimer);
+    panel.hidden = false;
+    $('launch').setAttribute('aria-expanded', 'true');
+    syncPageLayout(true);
+    if (config.displayMode === 'sidebar') {
+      panel.dataset.open = 'false';
+      panel.getBoundingClientRect();
+      requestAnimationFrame(() => { if (!panel.hidden) panel.dataset.open = 'true'; });
+    }
+  }
+  function closePanel() {
+    const panel = $('panel');
+    $('launch').setAttribute('aria-expanded', 'false');
+    syncPageLayout(false);
+    if (config.displayMode === 'sidebar' && !panel.hidden) {
+      panel.dataset.open = 'false';
+      panelCloseTimer = setTimeout(() => { if (panel.dataset.open !== 'true') panel.hidden = true; }, 270);
+    } else panel.hidden = true;
+  }
   function applyPanelMode(mode) {
     config.displayMode = mode === 'sidebar' ? 'sidebar' : 'floating';
     $('panel').dataset.display = config.displayMode;
     $('mode-sidebar').setAttribute('aria-pressed', String(config.displayMode === 'sidebar'));
     $('mode-floating').setAttribute('aria-pressed', String(config.displayMode === 'floating'));
+    $('panel').dataset.open = String(!$('panel').hidden);
+    syncPageLayout(!$('panel').hidden);
   }
   function collect(data) {
     try {
@@ -418,7 +469,7 @@
   }
   function message(text, kind = 'info') { const el = $('message'); el.textContent = text; el.className = `status-${kind}`; }
   function settings() {
-    return validateConfig({ api: $('api').value.trim(), workspace: $('workspace').value, workspaceAlias: $('workspace').selectedOptions[0]?.textContent || '', token: $('token').value, project: $('default-project').value, projectAlias: $('default-project').selectedOptions[0]?.textContent || '', agent: $('agent').value, defaultAgent: $('default-agent').value, label: $('default-label').value, hideNativeAI: $('hide-native-ai').checked, displayMode: config.displayMode });
+    return validateConfig({ api: $('api').value.trim(), workspace: $('workspace').value, workspaceAlias: $('workspace').selectedOptions[0]?.textContent || '', token: $('token').value, project: $('default-project').value, projectAlias: $('default-project').selectedOptions[0]?.textContent || '', agent: $('agent').value, defaultAgent: $('default-agent').value, label: $('default-label').value, hideNativeAI: $('hide-native-ai').checked, displayMode: config.displayMode, shortcut: config.shortcut });
   }
   function request(c) {
     return (method, path, body) => new Promise((resolve, reject) => {
@@ -796,12 +847,14 @@
       .quick-card{padding:0;overflow:hidden}.quick-head,.quick-foot{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid #e5e8f0}.quick-head strong{font-size:16px;color:#536078}.quick-head small{color:#9ca3af}.quick-body{padding:18px}.quick-body .task-title{font-size:23px;width:100%;border:0;border-bottom:1px solid #dce1ec;border-radius:0;box-shadow:none;padding-bottom:16px;margin-bottom:8px}.quick-body .task-title:focus{border-bottom-color:#60a5fa}.quick-body .task-description{min-height:205px;width:100%;border:0;box-shadow:none}.quick-source{display:flex;justify-content:space-between;gap:10px;padding:12px;border:1px solid #e5e8f0;background:#f6f7f9;border-radius:9px;font-size:12px;color:#667085}.quick-source strong{color:#344054}.quick-assignee{display:flex;align-items:center;gap:10px;margin:14px 0;color:#667085}.quick-avatar{display:grid;place-items:center;width:31px;height:31px;border-radius:50%;background:#eceff2;color:#4b5563;font-weight:700}.quick-options{display:flex;flex-wrap:wrap;gap:8px}.quick-options select,.quick-options .more-button{width:auto;max-width:230px;border-radius:24px;padding:9px 12px;font-size:12px}.quick-dates{margin-top:14px;border-top:1px solid #edf0f5;padding-top:12px}.quick-dates summary{font-size:12px;color:#667085;cursor:pointer}.quick-foot{border-top:1px solid #e5e8f0;border-bottom:0;gap:8px;flex-wrap:wrap}.quick-foot label{display:flex;align-items:center;gap:6px;margin:0;font-weight:400;font-size:12px}.quick-foot input{width:17px;height:17px;accent-color:#2563eb}.quick-foot .submit{width:auto;margin:0}.quick-foot .text-button{font-size:20px}.custom-server-panel{margin-top:10px;padding:12px;border:1px solid #e5e8f0;border-radius:9px;background:#f8f9fc}
       header .brand{min-width:0;flex:1}header .header-actions{flex:none;gap:4px}header .header-actions .icon-button{font-size:16px;padding:7px 9px}header .header-actions .text-button{padding:4px 6px}
       #view-multica{height:100%;min-height:max-content;display:flex;flex-direction:column}#view-multica .quick-card{flex:1 0 auto;display:flex;flex-direction:column;margin-bottom:0}#view-multica .quick-body{flex:1 0 auto;display:flex;flex-direction:column}#view-multica .task-description{flex:1 0 260px;height:auto;min-height:260px}
-      #panel[data-display="sidebar"]{position:fixed;top:0;right:0;bottom:0;left:auto;width:min(520px,100vw);height:100dvh;border-radius:0;border-top:0;border-right:0;border-bottom:0;box-shadow:-12px 0 48px #1e293b26}
+      #panel[data-display="sidebar"]{position:fixed;top:0;right:0;bottom:0;left:auto;width:min(520px,calc(100vw - 320px));height:100dvh;border-radius:0;border-top:0;border-right:0;border-bottom:0;box-shadow:-12px 0 48px #1e293b26;transform:translateX(102%);transition:transform .26s ease}
+      #panel[data-display="sidebar"][data-open="true"]{transform:translateX(0)}
+      .shortcut-control{display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap}.shortcut-control input{width:126px;font-size:12px;text-align:center}.shortcut-control button{padding:8px 9px;font-size:11px}
       .setting-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 0;border-bottom:1px solid #e5e8f0}.setting-row:last-child{border-bottom:0}.setting-copy{min-width:0}.setting-copy strong{display:block;font-size:13px;color:#273449}.setting-copy small{display:block;margin-top:4px}.setting-control{flex:none}.switch{position:relative;display:inline-flex;align-items:center;width:44px;height:26px;margin:0;cursor:pointer}.switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}.switch-track{width:44px;height:26px;border-radius:20px;background:#cbd5e1;transition:background .15s}.switch-track::after{content:"";display:block;width:20px;height:20px;margin:3px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #1e293b33;transition:transform .15s}.switch input:checked+.switch-track{background:#2563eb}.switch input:checked+.switch-track::after{transform:translateX(18px)}.switch input:focus-visible+.switch-track{outline:3px solid #93c5fd;outline-offset:2px}.segmented{display:flex;padding:3px;border:1px solid #dce1ec;border-radius:9px;background:#f1f3f6}.segmented button{padding:8px 12px;border:0;background:transparent;color:#64748b;font-size:12px;white-space:nowrap}.segmented button:hover{background:#e5eaf2}.segmented button[aria-pressed="true"]{background:#fff;color:#1e293b;box-shadow:0 1px 4px #1e293b1c}.settings-group>.hint{margin:0 0 4px}.settings-group .field>.hint{margin:4px 0 0}
       #task-extras>summary{display:none}.quick-foot #submit{margin-left:auto}.quick-source #task-source{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%}.quick-options select:hover{border-color:#b7becb}.quick-body .task-description:focus,.quick-body .task-title:focus{box-shadow:none}
       #count{margin:0 0 14px;font-size:12px;color:#8290a5}#warning{margin:10px 0 0;font-size:12px;line-height:1.7;color:#896a31}#handoff-title{margin:0;color:#334155;font-weight:600;overflow-wrap:anywhere}#handoff-meta{margin:8px 0 0}.target{display:grid;gap:4px;overflow-wrap:anywhere}.target small{font-size:11px;text-transform:uppercase;letter-spacing:.8px}.target strong{font-weight:500;font-size:13px}.divider{height:1px;background:#edf0f5;margin:14px 0}.check{display:flex;align-items:flex-start;gap:9px;font-weight:400;line-height:1.7;margin-top:17px}.check input{width:16px;height:16px;flex:none;margin:3px 0;accent-color:#3b82f6}.check span{font-size:12px;color:#66758b}.submit{width:100%;margin-top:16px}
       footer{flex:none;padding:12px 24px;background:#fff;border-top:1px solid #e7eaf1}#message{white-space:pre-wrap;margin:0;font-size:12px;color:#64748b;overflow-wrap:anywhere;max-height:110px;overflow:auto;display:flex;align-items:flex-start;gap:8px}#message::before{content:"";width:9px;height:9px;flex:none;margin-top:4px;border-radius:50%;background:#94a3b8}.status-success::before{background:#22c55e!important}.status-warning::before{background:#eab308!important}.status-error::before{background:#ef4444!important}details summary{cursor:pointer;font-size:13px;font-weight:600;color:#536078}details textarea{margin-top:12px}.version{font-size:11px;color:#9aa3b2;text-align:center;margin:18px 0 0}
-      @media(max-width:520px){#panel{right:8px;top:8px;bottom:76px;width:calc(100vw - 16px);border-radius:15px}#panel[data-display="sidebar"]{top:0;right:0;bottom:0;width:100vw;height:100dvh;border-radius:0}header{padding:16px}.tabs{padding:0 16px;gap:22px;overflow-x:auto}.content{padding:16px}footer{padding:12px 16px}.card{padding:14px}.setting-row{align-items:flex-start}.setting-control{align-self:center}#launch{right:12px;bottom:16px}}
+      @media(max-width:760px){#panel[data-display="sidebar"]{width:min(520px,100vw)}}@media(max-width:520px){#panel{right:8px;top:8px;bottom:76px;width:calc(100vw - 16px);border-radius:15px}#panel[data-display="sidebar"]{top:0;right:0;bottom:0;width:100vw;height:100dvh;border-radius:0}header{padding:16px}.tabs{padding:0 16px;gap:22px;overflow-x:auto}.content{padding:16px}footer{padding:12px 16px}.card{padding:14px}.setting-row{align-items:flex-start}.setting-control{align-self:center}#launch{right:12px;bottom:16px}}
       </style>
       <div id="success" class="success" hidden role="status" aria-live="polite"><span class="success-mark">✓</span><div><strong>创建成功</strong><span class="success-copy"></span></div></div>
       <button id="launch" aria-expanded="false" aria-controls="panel"><img src="/Templates/Default/Images/ai.webp" alt=""><span class="launch-text">Multica-AI · 未配置</span><span class="status-dot" aria-hidden="true"></span></button>
@@ -833,7 +886,7 @@
             <div class="section-intro"><div><div class="eyebrow">PREFERENCES</div><h3>设置</h3></div></div>
             <div class="card"><div class="settings-group"><h4>基础配置</h4><div class="field"><label for="api">API 服务根地址</label><select id="api"></select><p class="hint">选择官方服务，或添加你自己的 Multica 服务。</p><div id="custom-server-panel" class="custom-server-panel" hidden><label for="custom-api">添加自建服务器</label><div class="inline-control"><input id="custom-api" type="url" placeholder="https://your-multica.example"><button id="add-api" class="secondary">添加</button></div></div></div><div class="field"><label for="token">访问令牌（API Token）</label><input id="token" type="password" autocomplete="off"><p class="hint">用于连接 Multica，仅保存在当前站点的本地存储。</p></div><div class="row"><button id="connect" data-action>手动连接 / 刷新</button></div></div>
               <div class="settings-group"><h4>任务默认配置</h4><div class="field"><label for="workspace">默认工作区</label><select id="workspace"><option value="">请先连接</option></select><p class="hint">新任务使用这个工作区，可随时切换。</p></div><div class="field"><label for="default-project">默认项目</label><select id="default-project"><option value="">请先连接</option></select><p class="hint">预先填入任务创建页，提交前仍可修改。</p></div><div class="field"><label for="default-agent">默认处理智能体</label><select id="default-agent"><option value="">请先连接</option></select><p class="hint">新任务默认指派给这位智能体。</p></div><div class="field"><label for="default-label">默认标签</label><select id="default-label"><option value="">不指定标签</option></select><p class="hint">新任务默认使用的标签，可留空。</p></div></div>
-              <div class="settings-group"><h4>UI 设置</h4><div class="setting-row"><div class="setting-copy"><strong>主面板显示样式</strong><small>选择工作台以侧边栏或浮窗方式显示</small></div><div class="setting-control segmented" role="group" aria-label="主面板显示样式"><button id="mode-sidebar" type="button" aria-pressed="false">侧边栏</button><button id="mode-floating" type="button" aria-pressed="true">浮窗</button></div></div><div class="setting-row"><div class="setting-copy"><strong>隐藏 BugDone 原有 AI 按钮</strong><small>隐藏页面内置的 AI 入口（openIntelligentTracking）</small></div><label class="switch setting-control" aria-label="隐藏 BugDone 原有 AI 按钮"><input type="checkbox" id="hide-native-ai"><span class="switch-track" aria-hidden="true"></span></label></div></div><div class="row"><button id="save" data-action>保存设置</button></div><p class="hint">自建服务器还需允许油猴或 Mac App 网络桥访问。</p></div>
+              <div class="settings-group"><h4>UI 设置</h4><div class="setting-row"><div class="setting-copy"><strong>打开任务面板快捷键</strong><small>在当前网页快速打开 AI 任务创建</small></div><div class="setting-control shortcut-control"><input id="shortcut" type="text" readonly aria-label="打开任务面板快捷键"><button id="edit-shortcut" class="secondary" type="button">修改</button><button id="reset-shortcut" class="secondary" type="button">恢复默认</button></div></div><div class="setting-row"><div class="setting-copy"><strong>主面板显示样式</strong><small>选择工作台以侧边栏或浮窗方式显示</small></div><div class="setting-control segmented" role="group" aria-label="主面板显示样式"><button id="mode-sidebar" type="button" aria-pressed="false">侧边栏</button><button id="mode-floating" type="button" aria-pressed="true">浮窗</button></div></div><div class="setting-row"><div class="setting-copy"><strong>隐藏 BugDone 原有 AI 按钮</strong><small>隐藏页面内置的 AI 入口（openIntelligentTracking）</small></div><label class="switch setting-control" aria-label="隐藏 BugDone 原有 AI 按钮"><input type="checkbox" id="hide-native-ai"><span class="switch-track" aria-hidden="true"></span></label></div></div><div class="row"><button id="save" data-action>保存设置</button></div><p class="hint">自建服务器还需允许油猴或 Mac App 网络桥访问。</p></div>
             <p class="version">BugDone → Multica · v${SCRIPT_VERSION}</p>
           </section>
           <section id="view-processing" role="tabpanel" aria-labelledby="tab-processing" hidden>
@@ -855,6 +908,7 @@
     fillSelect('task-label', catalog.labels || [], config.label, '无标签');
     $('hide-native-ai').checked = config.hideNativeAI !== false;
     applyPanelMode(config.displayMode);
+    $('shortcut').value = config.shortcut.replaceAll('+', ' + ');
     const launch = $('launch');
     if (launchPosition && Number.isFinite(Number(launchPosition.left)) && Number.isFinite(Number(launchPosition.top))) {
       launch.style.left = `${Number(launchPosition.left)}px`; launch.style.top = `${Number(launchPosition.top)}px`; launch.style.right = 'auto'; launch.style.bottom = 'auto';
@@ -878,8 +932,9 @@
       if (drag.moved) { suppressLaunchClick = true; try { writeValue('launchPosition', { left: launch.getBoundingClientRect().left, top: launch.getBoundingClientRect().top }); } catch (_) {} setTimeout(() => { suppressLaunchClick = false; }, 0); }
       drag = null;
     });
-    launch.onclick = () => { if (suppressLaunchClick) return; $('panel').hidden = !$('panel').hidden; launch.setAttribute('aria-expanded', String(!$('panel').hidden)); if (!$('panel').hidden) root.querySelector('[role=tab][aria-selected=true]').focus(); };
-    $('close').onclick = () => { $('panel').hidden = true; $('launch').setAttribute('aria-expanded', 'false'); $('launch').focus(); };
+    launch.onclick = () => { if (suppressLaunchClick) return; if (launch.getAttribute('aria-expanded') === 'true') closePanel(); else { openPanel(); root.querySelector('[role=tab][aria-selected=true]').focus(); } };
+    $('close').onclick = () => { closePanel(); $('launch').focus(); };
+    window.addEventListener('resize', () => syncPageLayout($('launch').getAttribute('aria-expanded') === 'true'));
     $('panel').addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); $('close').click(); } });
     const tabs = [...root.querySelectorAll('[role="tab"]')];
     tabs.forEach((tab, index) => {
@@ -895,10 +950,25 @@
     });
     $('next').onclick = () => { $('task-title').value = $('title').value; $('task-description').value = $('description').value; $('task-source').textContent = bugs.get($('bug').value)?.sourceUrl || location.href; switchTab('multica', true); };
     $('task-more').onclick = () => { $('task-extras').open = !$('task-extras').open; };
+    let capturingShortcut = false;
+    $('edit-shortcut').onclick = () => { capturingShortcut = true; $('shortcut').value = '请按快捷键…'; $('shortcut').focus(); };
+    $('shortcut').onkeydown = event => {
+      event.stopPropagation();
+      if (!capturingShortcut) return;
+      event.preventDefault();
+      if (event.key === 'Escape') { capturingShortcut = false; $('shortcut').value = config.shortcut.replaceAll('+', ' + '); return; }
+      const shortcut = shortcutFromEvent(event);
+      if (!shortcut) { message('请按 Ctrl、Alt 或 Command，加字母或数字键。', 'warning'); return; }
+      config.shortcut = shortcut;
+      capturingShortcut = false;
+      $('shortcut').value = shortcut.replaceAll('+', ' + ');
+      writeValue('config', { ...config });
+      message(`快捷键已保存：${$('shortcut').value}`, 'success');
+    };
+    $('shortcut').onblur = () => { if (capturingShortcut) { capturingShortcut = false; $('shortcut').value = config.shortcut.replaceAll('+', ' + '); } };
+    $('reset-shortcut').onclick = () => { capturingShortcut = false; config.shortcut = DEFAULT_SHORTCUT; $('shortcut').value = DEFAULT_SHORTCUT.replaceAll('+', ' + '); writeValue('config', { ...config }); message('快捷键已恢复默认。', 'success'); };
     document.addEventListener('keydown', event => {
-      if (event.altKey && event.shiftKey && event.key.toLowerCase() === 'm') {
-        event.preventDefault(); $('panel').hidden = false; $('launch').setAttribute('aria-expanded', 'true'); switchTab('multica', true);
-      }
+      if (shortcutMatches(event, config.shortcut)) { event.preventDefault(); openPanel(); switchTab('multica', true); }
     });
     $('task-attachments').onclick = () => switchTab('bug', true);
     $('refresh-processing').onclick = () => { void refreshProcessingStatuses(true); };

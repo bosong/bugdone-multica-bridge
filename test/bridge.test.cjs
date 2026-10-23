@@ -8,12 +8,20 @@ const end = source.indexOf('  // 调试桩：');
 assert.ok(start >= 0 && end > start);
 assert.ok(!/\bmodule\b|\brequire\s*\(/.test(source));
 const bridge = new Function('return ' + source.slice(start, end) +
-  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey, listItems, buildIssueBody, bugTaskTitle, connectionCacheTag, needsCatalogRefresh, connectionBadge, verifyConnection, lookupSubmittedIssue, issueStatusLabel, loadSubmittedStatuses };\n})();')();
+  'return { parseResponse, mergeBug, marker, owns, isBugAPI, validateConfig, findExisting, submitOnce, shareURL, agentChoices, agentCacheKey, listItems, buildIssueBody, bugTaskTitle, connectionCacheTag, needsCatalogRefresh, connectionBadge, verifyConnection, lookupSubmittedIssue, issueStatusLabel, loadSubmittedStatuses, shortcutFromEvent, shortcutMatches };\n})();')();
 const id = '7603f73c983242c1811852a53b26e2c3';
 const c = { api: 'https://api.multica.ai', workspace: '11111111-1111-4111-8111-111111111111', token: 'test' };
 const bug = { BugId: id };
 const issue = { id: 'task-id', title: `${bridge.marker(id)} 测试 Bug`, status: 'done' };
 const body = { title: issue.title };
+test('快捷键须包含主修饰键，并能准确区分组合', () => {
+  const event = { key: 'm', altKey: true, shiftKey: true, ctrlKey: false, metaKey: false };
+  assert.equal(bridge.shortcutFromEvent(event), 'Alt+Shift+M');
+  assert.equal(bridge.shortcutMatches(event, 'Alt+Shift+M'), true);
+  assert.equal(bridge.shortcutMatches({ ...event, shiftKey: false }, 'Alt+Shift+M'), false);
+  assert.equal(bridge.shortcutFromEvent({ ...event, altKey: false }), '');
+  assert.equal(bridge.shortcutFromEvent({ ...event, key: 'Shift' }), '');
+});
 test('连接列表兼容数组与包装结果；任务选项正确写入创建请求', () => {
   assert.deepEqual(bridge.listItems({ workspaces: [{ id: 'w', name: '研发' }] }, 'workspaces'), [{ id: 'w', name: '研发' }]);
   assert.deepEqual(bridge.listItems([{ id: 'p', name: '项目' }], 'projects'), [{ id: 'p', name: '项目' }]);
