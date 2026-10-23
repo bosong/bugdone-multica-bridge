@@ -2,6 +2,8 @@
 
 一个油猴脚本，在 BugDone 页面中读取 Bug 详情，将 Bug 创建为 Multica 任务并指派给智能体。支持 Mac App WebView 的 Fastlane 原生网络桥。
 
+多站点配置捕获、友盟崩溃分析和任意网页手动选取的远期需求与实施步骤见[设计文档](./doc/dynamic-capture-design.md)。
+
 ![BugDone 接入 Multica 的界面预览](./assets/ui-preview.png)
 
 ![侧边栏与 UI 设置预览](./assets/sidebar-preview.png)
