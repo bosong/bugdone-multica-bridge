@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BugDone 接入 Multica
 // @namespace    local.bugdone.multica
-// @version      1.0.5
+// @version      1.0.6
 // @description  BugDone桥接Multica智能体
 // @updateURL    https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
 // @downloadURL  https://raw.githubusercontent.com/bosong/bugdone-multica-bridge/main/bugdone-multica.user.js
@@ -227,7 +227,7 @@
   function shortcutMatches(event, shortcut) { return !!shortcut && shortcutFromEvent(event) === shortcut; }
   // 调试桩：仅打印阶段、数量和 HTTP 状态，不打印令牌、请求头或 Bug 正文。
   const DEBUG = true;
-  const SCRIPT_VERSION = '1.0.5';
+  const SCRIPT_VERSION = '1.0.6';
   function debug(stage, data = {}, level = 'info') {
     if (DEBUG) console[level](`[BugDone→Multica] ${stage}`, data);
   }
@@ -319,10 +319,14 @@
       ? Math.min(520, window.innerWidth - 320) : 0;
     clearTimeout(layoutRestoreTimer);
     if (shift) {
+      html.dataset.bugdoneMulticaDrawerOpen = 'true';
+      html.style.setProperty('--bugdone-multica-drawer-width', `${shift}px`);
       if (!pageLayoutSnapshot) pageLayoutSnapshot = { width: html.style.width, transition: html.style.transition };
       html.style.transition = pageLayoutSnapshot.transition ? `${pageLayoutSnapshot.transition}, width .26s ease` : 'width .26s ease';
       html.style.width = `calc(100% - ${shift}px)`;
     } else if (pageLayoutSnapshot) {
+      delete html.dataset.bugdoneMulticaDrawerOpen;
+      html.style.removeProperty('--bugdone-multica-drawer-width');
       html.style.width = pageLayoutSnapshot.width;
       layoutRestoreTimer = setTimeout(() => {
         if (!pageLayoutSnapshot) return;
@@ -340,7 +344,7 @@
     if (config.displayMode === 'sidebar') {
       panel.dataset.open = 'false';
       panel.getBoundingClientRect();
-      requestAnimationFrame(() => { if (!panel.hidden) panel.dataset.open = 'true'; });
+      panel.dataset.open = 'true';
     }
   }
   function closePanel() {
@@ -827,6 +831,12 @@
   }
   function mount() {
     debug('开始挂载按钮');
+    if (!document.getElementById('bugdone-multica-page-shift')) {
+      const style = document.createElement('style');
+      style.id = 'bugdone-multica-page-shift';
+      style.textContent = 'html[data-bugdone-multica-drawer-open="true"] #asideProblem{right:var(--bugdone-multica-drawer-width)!important;max-width:calc(100vw - var(--bugdone-multica-drawer-width))!important}';
+      document.head.append(style);
+    }
     const host = document.createElement('div'); host.id = 'bugdone-multica-bridge';
     document.body.append(host); root = host.attachShadow({ mode: 'closed' });
     document.documentElement.setAttribute('data-bugdone-multica-started', SCRIPT_VERSION);
